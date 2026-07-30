@@ -160,5 +160,3 @@ python -m unittest discover -s plugins/auto-progress/scripts -p "test_*.py" -v
 python plugins/auto-progress/scripts/auto_progress.py validate-config `
   --config plugins/auto-progress/assets/auto-progress.toml
 ```
-
-插件源代码、模板和策略文档不应包含真实项目名、私人仓库地址、账号邮箱、本机绝对路径或凭据。项目专属信息只应存在于使用者自己的受管项目配置中。
