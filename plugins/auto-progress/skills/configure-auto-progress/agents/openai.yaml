@@ -1,0 +1,7 @@
+interface:
+  display_name: "Configure AutoProgress"
+  short_description: "Configure, pause, resume, and inspect AutoProgress"
+  default_prompt: "Use $configure-auto-progress to configure this Unity repository."
+
+policy:
+  allow_implicit_invocation: false

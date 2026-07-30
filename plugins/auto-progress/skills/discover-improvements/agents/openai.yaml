@@ -1,0 +1,7 @@
+interface:
+  display_name: "Discover Improvements"
+  short_description: "Find review-ready Unity C# improvements"
+  default_prompt: "Use $discover-improvements to review a bounded Unity C# slice and propose improvement candidates."
+
+policy:
+  allow_implicit_invocation: false

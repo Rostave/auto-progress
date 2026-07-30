@@ -1,0 +1,4 @@
+interface:
+  display_name: "Maintain Project"
+  short_description: "Run guarded daily maintenance for a Unity repository"
+  default_prompt: "Use $maintain-project to run an approved AutoProgress maintenance cycle."

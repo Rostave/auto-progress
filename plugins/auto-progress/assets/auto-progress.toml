@@ -1,0 +1,77 @@
+schema_version = 2
+
+[project]
+base_branch = "feature/your-base-branch"
+timezone = "Asia/Shanghai"
+paused = false
+max_run_minutes = 60
+
+[schedule]
+window_start = "19:30"
+window_end = "20:00"
+defer_minutes = 10
+
+[batch]
+max_improvements = 3
+
+[discovery]
+initial_files = 30
+expansion_files = 15
+max_files = 60
+max_source_lines = 12000
+target_queued_automatic_improvements = 10
+max_new_improvements = 10
+revisit_after_maintenance_days = 7
+closed_pr_cooldown_maintenance_days = 7
+
+[change_budget]
+csharp_files_suggested = 3
+csharp_files_hard = 5
+changed_lines_suggested = 100
+changed_lines_hard = 200
+all_files_hard = 8
+
+[batch_budget]
+csharp_files_suggested = 6
+csharp_files_hard = 10
+changed_lines_suggested = 250
+changed_lines_hard = 500
+all_files_hard = 18
+
+[directed_budget]
+csharp_files_absolute = 10
+changed_lines_absolute = 500
+all_files_absolute = 15
+
+[retry]
+cooldown_maintenance_days = 7
+
+[paths]
+allowed = ["Assets/"]
+excluded = [
+  "Assets/**/Editor Default Resources/**",
+  "Assets/Plugins/**",
+  "Library/**",
+  "Logs/**",
+  "Packages/**",
+  "ProjectSettings/**",
+  "Temp/**",
+]
+ideas = "docs/auto-progress/improvements"
+directed = "docs/auto-progress/directed"
+rejections = "docs/auto-progress/rejections"
+status = "docs/auto-progress/status.md"
+
+[[validation.steps]]
+name = "C# solution build"
+program = "dotnet"
+args = ["msbuild", "YourUnityProject.sln", "-nologo", "-verbosity:minimal"]
+working_directory = "."
+timeout_minutes = 15
+success_exit_codes = [0]
+
+[unity_mcp]
+enabled = true
+provider = "CoplayDev/unity-mcp"
+expected_project_root = "."
+refresh_after_checkout = true

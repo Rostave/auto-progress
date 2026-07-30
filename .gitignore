@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.worktrees/
+
+# Local editor and operating-system state
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local AutoProgress runtime state never belongs in the source repository
+*.jsonl
+*.lock

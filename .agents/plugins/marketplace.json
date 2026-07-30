@@ -1,0 +1,20 @@
+{
+  "name": "auto-progress-local",
+  "interface": {
+    "displayName": "Auto Progress Local"
+  },
+  "plugins": [
+    {
+      "name": "auto-progress",
+      "source": {
+        "source": "local",
+        "path": "./plugins/auto-progress"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

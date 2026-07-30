@@ -1,0 +1,7 @@
+interface:
+  display_name: "Queue Directed Improvement"
+  short_description: "Create a human-directed AutoProgress improvement item"
+  default_prompt: "Use $queue-directed-improvement to queue a directed improvement."
+
+policy:
+  allow_implicit_invocation: false
