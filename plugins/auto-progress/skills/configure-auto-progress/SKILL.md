@@ -10,7 +10,7 @@ This is a manual administration entry point. Read [references/configuration.md](
 ## Supported operations
 
 - Initialize `.codex/auto-progress.toml` from the plugin template.
-- Migrate an existing version 1 policy to version 2 only when a human explicitly requests `migrate`; show the complete diff before confirmation, then leave the resulting tracked change for human review and commit.
+- Migrate older policies only when a human explicitly requests `migrate`. Version 1 first receives the documented v2 fields; version 2 then migrates to v3. Use `migrate-config-v3` to preview the complete deterministic diff, obtain confirmation, and only then rerun it with `--write`; leave the tracked change for human review and commit.
 - Set the one base branch used both as the work source and pull-request target.
 - Configure structured C# validation, discovery limits, change budgets, paths, Unity MCP expectations, and retry cooldown.
 - Validate configuration and run a read-only repository preflight.

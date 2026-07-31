@@ -1,6 +1,6 @@
 ---
 id: IMP-YYYY.MM.DD-xxxxxxxx
-state: pending
+state: queued
 priority: normal
 created_at: YYYY-MM-DDTHH:MM:SS+08:00
 created_by: human

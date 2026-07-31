@@ -11,6 +11,7 @@ After eligibility and approval, call the shared `claim-allowance` command with `
 
 ## Hard safety and workspace lease
 
+- For every gate or Git transition covered by the shared script, call that deterministic entry point and treat its structured result as authoritative. Consume successful stages silently unless requested or required in the final artifact; report failures without reproducing checks in prose or bypassing them with model judgment.
 - The configured base branch is the only source and PR target.
 - Reuse the original Unity checkout and Library; do not create a second Unity project.
 - Record the original branch and HEAD and require a clean tree with no active Git operation.
@@ -55,7 +56,7 @@ Record each item as `delivered`, `deferred`, or `reverted`. A delivered item bec
 
 ## Unity and PR
 
-If Unity is already open for the exact project root, refresh after checkout and inspect compiler results through Unity MCP. Only a passing refresh/compile allows Ready status. Otherwise the Draft PR must say **未经 Unity 编译测试**.
+If Unity is already open for the exact project root and the configured MCP adapter is available, refresh after checkout and inspect compiler results through Unity MCP. Optional MCP absence or failure does not block workspace admission; record `unity_unverified`. Only a passing refresh/compile allows Ready status. Otherwise the Draft PR must say **未经 Unity 编译测试**.
 
 Use branch:
 

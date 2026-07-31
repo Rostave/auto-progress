@@ -5,12 +5,96 @@
 ## Language
 
 **受管项目（Managed Project）**:
-已启用周期性 Codex 维护流程的 Unity Git 仓库。
+已通过项目策略选择源码控制与审查托管适配器、启用周期性 Codex 维护流程的 Unity 项目。
 _Avoid_: 自动提交项目、刷绿项目
 
 **AutoProgress 插件（AutoProgress Plugin）**:
-集中提供每日维护、项目配置和人工指令录入能力，并由多个受管项目共享的 Codex 插件。
+集中提供每日维护、项目配置和人工指令录入能力、可供受管项目安装使用的 Codex 插件。
 _Avoid_: 单一 skill、仓库脚本
+
+**源码控制适配器（Source Control Adapter）**:
+为一种源码控制工具提供项目身份、版本快照、工作区转换和变更交付语义的 AutoProgress 路由实现；当前只有 Git 适配器。
+_Avoid_: 托管平台、GitHub 适配器、通用仓库脚本
+
+**审查托管适配器（Review Host Adapter）**:
+为一种代码审查托管平台提供身份验证、变更请求、审查和检查状态语义的 AutoProgress 路由实现；当前只有 GitHub 适配器。
+_Avoid_: 源码控制、Git 适配器、PR 脚本
+
+**基准快照（Base Snapshot）**:
+源码控制适配器为一次运行冻结、作为变更来源和项目策略来源的不可变版本状态；Git 适配器以 commit SHA 表达它。
+_Avoid_: 最新代码、本地分支、工作区 HEAD
+
+**变更上下文（Change Context）**:
+源码控制适配器为一次运行建立、用于隔离和承载候选改动的工具特定上下文；Git 适配器以工作分支或 worktree 表达它。
+_Avoid_: 工作分支、临时目录、模型工作区
+
+**适配器能力（Adapter Capability）**:
+适配器对自身可提供的安全生命周期语义所作的机器可判定声明，用于在任务开始前与任务类型的必需能力严格匹配。
+_Avoid_: 工具特性、模型降级、可选步骤
+
+**适配器注册表（Adapter Registry）**:
+由受信任 AutoProgress 插件包提供、将稳定适配器 ID 映射到兼容实现与能力声明的本地权威目录。
+_Avoid_: 项目脚本列表、命令路径、模型工具选择
+
+**适配器状态迁移（Adapter State Migration）**:
+由适配器提供、把未终结运行的旧状态 schema 确定性转换为当前兼容状态且保留原状态证据的恢复步骤。
+_Avoid_: 模型解释旧状态、项目配置迁移、重新运行
+
+**Unity 验证适配器（Unity Validation Adapter）**:
+由确定性入口直接调用、通过已配置 MCP endpoint 验证 Unity 项目身份、Editor 状态和编译结果的可选工具实现。
+_Avoid_: 模型 MCP 调用、Unity 进程检测、C# 命令验证
+
+**确定性执行层（Deterministic Execution Layer）**:
+AutoProgress 中由普通程序依据显式输入完成严格校验、状态转换和机械操作，并返回结构化成功结果或明确失败原因的职责边界。
+_Avoid_: 辅助脚本、模型工具调用、提示词检查
+
+**模型推理层（Model Reasoning Layer）**:
+AutoProgress 中由大模型承担语义理解、方案设计、代码编写与审查，并把确定性执行结果组织成人类可读交互的职责边界。
+_Avoid_: 工作流引擎、条件校验器、脚本包装器
+
+**确定性豁免规则（Deterministic Exemption Rule）**:
+由受版本控制的项目策略明确声明、供确定性执行层判定某类已知无害状态不构成失败的有限规则；它不授予模型覆盖脚本结论的权力。
+_Avoid_: 模型放行、临时忽略、软失败
+
+**额外忽略规则（Additional Ignore Rule）**:
+项目策略在 Git 自身忽略规则之外，对已知无害未跟踪路径声明的附加 ignore 规则；它不改变仓库的 `.gitignore`，也不适用于任何已跟踪或 staged 状态。
+_Avoid_: AutoProgress gitignore、额外 .gitignore、工作区通用豁免
+
+**工作区准入（Workspace Admission）**:
+AutoProgress 在接管原工作区和进入目标运行状态时分别证明人工现场受到保护、运行环境满足安全门槛的两阶段资格。
+_Avoid_: 单次 preflight、checkout 检查、工作区清理
+
+**工作区恢复义务（Workspace Restoration Obligation）**:
+确定性执行层在未开始核心工作前发生状态转换失败时，将所有可逆工作区状态恢复到已记录起点的责任；无法安全恢复时必须保留现场并阻止后续运行。
+_Avoid_: 自动清理、尽力回滚、失败后继续
+
+**确定性阶段（Deterministic Stage）**:
+具有显式前提、单一职责和明确完成边界的一次确定性执行；成功完成后形成后续阶段不得撤销的事实。
+_Avoid_: 大脚本、提示词步骤、整次运行
+
+**确定性入口（Deterministic Entry Point）**:
+供模型粗粒度调用、在代码内部编排一个或多个确定性阶段及其检查点、重试和恢复协议的命令边界。
+_Avoid_: 单命令包装器、模型工作清单、确定性阶段
+
+**交付清单（Delivery Manifest）**:
+模型为一次候选交付声明改进项归属、用户可读摘要、验收说明和设计取舍的有界语义输入；实际变更、验证和版本控制事实不以清单声明为准。
+_Avoid_: PR 正文、Git diff、运行状态
+
+**已验证内容指纹（Validated Content Fingerprint）**:
+对一次验证实际覆盖的模型改动路径、内容身份和版本属性所作的稳定摘要，用于证明验证后除指定确定性产物外没有内容变化。
+_Avoid_: 整仓库 hash、commit SHA、构建缓存键
+
+**阶段检查点（Stage Checkpoint）**:
+确定性阶段成功完成后保存、允许后续阶段查询实际结果并安全继续的持久事实。
+_Avoid_: 临时输出、模型记忆、回滚点
+
+**静默成功（Silent Success）**:
+确定性阶段成功且无需人工行动时，仅作为后续推理和阶段执行依据而不主动打扰用户的交互结果。
+_Avoid_: 隐藏失败、无日志运行、成功通知
+
+**确定性重试（Deterministic Retry）**:
+由代码依据稳定失败分类、对账结果和固定上限执行的安全阶段重试，不依赖模型猜测瞬时故障或副作用状态。
+_Avoid_: 模型重跑、无限重试、失败放行
 
 **AutoProgress 任务类型（AutoProgress Task Type）**:
 占用每日活动额度、具有独立资格检查、核心工作和完成规则的可扩展任务类别；当前包含处理批次改进与寻找改进项。
@@ -72,8 +156,12 @@ _Avoid_: 文件锁、worktree、后台权限
 保存在 Codex 本地状态目录、以追加事件方式记录许可、运行和结果的统计事实来源。
 _Avoid_: Git 日志、状态文档
 
+**运行状态（Run State）**:
+保存在 Codex 本地状态目录、记录一次尚未终结运行的阶段检查点、当前事实和恢复义务的代码所有状态。
+_Avoid_: 模型记忆、运行账本、仓库状态文件
+
 **运行记录（Run Record）**:
-随实际改动 PR 提交的人类可读文档，描述一次运行的选择依据、验证、豁免和产物。
+由代码根据交付清单与确定性事实生成、随实际改动 review 提交的人类可读文档，描述一次运行的选择依据、验证、豁免和产物。
 _Avoid_: 运行账本、日报
 
 **状态报告（Status Report）**:

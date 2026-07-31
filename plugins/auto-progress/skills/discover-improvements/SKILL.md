@@ -10,15 +10,15 @@ Discover a bounded C# review slice, create batch-ready candidate documents, and 
 ## Eligibility
 
 1. Require an explicit human invocation. Never invoke this skill from a schedule, `$maintain-project`, or another task type.
-2. Read and validate `.codex/auto-progress.toml`. Version 1 requires `$configure-auto-progress migrate`; stop before claiming the allowance.
-3. Run the shared preflight in `discovery` mode. The original Unity checkout may be dirty or open because discovery uses a lightweight worktree.
+2. Check inventory and open discovery reviews before claiming the allowance. Then generate a run ID and call `prepare-run` with task type `discover-improvements`; it freezes the base policy, validates adapters, claims the allowance, and creates the lightweight worktree. The original Unity checkout may be dirty or open.
 4. Before claiming the allowance, stop normally when the target inventory is already met or an open/Draft discovery PR exists.
 5. Treat an optional focus as a repository-relative path inside `paths.allowed`. It may bypass module revisit cooldown only.
 
+Treat deterministic helper output as authoritative for every condition it covers. Consume successful structured results silently unless the human asks or the final artifact requires disclosure; report failures according to the workflow. Do not spend model reasoning rechecking the same facts or override a failed gate.
+
 ## Claim and review
 
-1. Create one `RUN-...` ID, then atomically claim the allowance with task type `discover-improvements`.
-2. Fetch and create a temporary worktree from the latest `origin/<base_branch>` using the run-based discovery branch name.
+1. Use only the change context admitted by `prepare-run`; do not reproduce its fetch, policy, allowance, branch, or worktree checks.
 3. Read the rejection register, authoritative improvement documents, and closed discovery candidates still in cooldown.
 4. Review the adaptive slice: use configured initial and expansion rounds and obey the file, source-line, candidate, and run-time hard limits.
 5. Admit only candidates with `value >= 1`, `confidence >= 2`, `risk <= 1`, concrete code evidence, an independently testable scope, and no rejection or duplicate match.
@@ -28,9 +28,9 @@ Discover a bounded C# review slice, create batch-ready candidate documents, and 
 - Create one document per candidate from the plugin's `automatic-improvement.md` asset. Record all batch-ready metadata and evidence blob SHAs.
 - Do not edit C#, tests, Unity assets, project settings, packages, or status snapshots. Do not run C# validation, Unity MCP, or Unity.
 - Before committing, compare candidate document paths with the open implementation PR's changed paths. Any overlap requires human resolution.
-- Commit the candidate documents, push the run branch, and open one Draft discovery PR against the configured base branch using `discovery-pr-body.md`.
+- Submit candidate ownership and semantic summaries through the delivery manifest to `finish-run`. It deterministically renders the report, commits, pushes, opens the Draft discovery review, writes ledger events, and removes the worktree. Discovery skips C# and Unity validation by contract.
 - Never merge or mark the discovery PR Ready automatically.
 - Append bounded ledger events for start, reviewed file/line totals, candidate IDs, commit, push, PR, result, and duration.
-- Always remove the temporary worktree after a normal finish. Preserve and report it only when cleanup would lose unrecovered work.
+- Let `finish-run` remove the temporary worktree after a normal finish and let `recover-run` reconcile interrupted cleanup. Preserve and report the worktree whenever deterministic cleanup would lose unrecovered work.
 
 Zero candidates is a valid result after the allowance is claimed. It does not permit switching to another task type that day.

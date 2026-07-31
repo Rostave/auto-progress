@@ -2,16 +2,21 @@
 
 The tracked project contract is `.codex/auto-progress.toml`. Keep local execution history outside the repository under the Codex state directory.
 
+Automatic tasks load this contract from the immutable base SHA recorded by `fetch-base`, including during admission of a checkout currently on another branch. A current checkout's older or broader configuration never expands automatic-task authority.
+
 ## Required model
 
-- `schema_version` is currently `2`.
+- The implemented schema version is `3`. Version 2 with `enabled = false` is interpreted as disabled for compatibility; an enabled version-2 Unity MCP configuration requires explicit human migration before an automatic task can claim the daily allowance.
 - Version 1 must be migrated through a human-invoked `$configure-auto-progress migrate`; automatic tasks stop before claiming the daily allowance when they encounter it.
 - `[project].base_branch` is the sole work source and pull-request target.
 - `[project].timezone` is an IANA zone, normally `Asia/Shanghai`.
+- New configurations explicitly set `[tools].source_control = "git"` and `[tools].review_host = "github"`. Existing schema-version-2 configurations without `[tools]` deterministically use those defaults. Never auto-detect or silently fall back from a configured adapter.
 - `[[validation.steps]]` is structured as a program plus argument array. Shell snippets are invalid.
 - Budget values are positive and satisfy suggested ≤ hard ≤ directed absolute.
 - Paths are repository-relative and may not escape the repository.
-- Unity MCP must identify the expected project root exactly.
+- `[workspace].additional_ignore_patterns` is an optional empty-by-default list of repository-relative Git-ignore-style patterns. It filters only otherwise-untracked paths during workspace admission; absolute paths, `..`, repository escape, and `!` negation are invalid, and it never exempts tracked or staged state.
+- The implemented Unity MCP contract uses `[unity_mcp].mode = "disabled" | "optional" | "required"`, a trusted `adapter` ID, `transport = "streamable_http"`, a complete loopback `url`, expected project root, and bounded connect/operation timeouts. The deterministic entry point—not the model—calls MCP, validates initialize/tool/resource schemas through the registered adapter, and verifies project identity and content fingerprint.
+- In `optional` mode, an open Editor with no usable MCP connection falls back to structured C# validation and does not block workspace admission; record `unity_unverified` and keep the review Draft. In `required` mode the same condition blocks delivery.
 
 ## Version 1 to version 2 migration
 
@@ -26,6 +31,16 @@ Migration is a manual administration action:
 7. After confirmation, update only `.codex/auto-progress.toml`, validate it, and leave the change uncommitted for human review.
 
 Never invoke migration from a scheduled run, implementation run, or discovery run.
+
+## Version 2 to version 3 Unity MCP migration
+
+Preview with `python <plugin-root>/scripts/auto_progress.py migrate-config-v3 --config .codex/auto-progress.toml` for a disabled legacy configuration. For an enabled legacy configuration, also provide `--mode optional|required --url <complete-loopback-url>` and confirm the adapter and timeout options. After human approval, repeat the exact command with `--write`, then run `validate-config`.
+
+- New version-3 configurations use `mode`, `transport`, a complete loopback `url`, expected project root, and bounded timeouts.
+- Legacy `enabled = false` maps deterministically to `mode = "disabled"`.
+- Legacy `enabled = true` requires a human `$configure-auto-progress migrate` action to choose `optional` or `required`, confirm the suggested registered adapter ID, enter the complete endpoint URL, and confirm root/timeouts. Never guess a port or silently disable validation.
+- Legacy `provider` may suggest a known adapter mapping but cannot confirm it automatically and is not a network endpoint.
+- Automatic tasks encountering an enabled legacy configuration stop before the daily allowance with `unity_mcp_migration_required`.
 
 ## Pause semantics
 

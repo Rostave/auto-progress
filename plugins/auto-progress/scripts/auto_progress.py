@@ -4,21 +4,29 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import difflib
+import fnmatch
 import hashlib
 import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PureWindowsPath
 from typing import Any, Iterable
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import unity_mcp
 
 
 ID_KINDS = {"improvement": "IMP", "run": "RUN", "event": "EVT"}
@@ -30,10 +38,15 @@ TIME_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 SAFE_BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 RUN_ID_PATTERN = re.compile(r"^RUN-\d{4}\.\d{2}\.\d{2}-[0-9a-f]{8}$")
 TASK_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9-]*$")
+PROJECT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
 
 
 class AutoProgressError(RuntimeError):
     """Expected, user-actionable command failure."""
+
+    def __init__(self, message: str, reason_code: str = "auto_progress_error") -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -72,14 +85,15 @@ def validate_relative_path(value: Any, field: str, *, allow_dot: bool = False) -
 
 
 def validate_config(config: dict[str, Any]) -> dict[str, Any]:
+    config = copy.deepcopy(config)
     schema_version = config.get("schema_version")
     if schema_version == 1:
         raise AutoProgressError(
             "schema_version 1 requires a human-invoked "
             "$configure-auto-progress migrate before automatic tasks may run"
         )
-    if schema_version != 2:
-        raise AutoProgressError("schema_version must be 2")
+    if schema_version not in {2, 3}:
+        raise AutoProgressError("schema_version must be 2 or 3", "unsupported_schema_version")
 
     project = require_table(config, "project")
     base = project.get("base_branch")
@@ -219,23 +233,190 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
                 f"{field}.success_exit_codes must be a non-empty integer array"
             )
 
-    unity = require_table(config, "unity_mcp")
-    if not isinstance(unity.get("enabled"), bool):
-        raise AutoProgressError("unity_mcp.enabled must be true or false")
-    if unity["enabled"]:
-        if not isinstance(unity.get("provider"), str) or not unity["provider"].strip():
-            raise AutoProgressError("unity_mcp.provider is required when enabled")
-        validate_relative_path(
-            unity.get("expected_project_root"),
-            "unity_mcp.expected_project_root",
-            allow_dot=True,
+    tools = config.get("tools")
+    if schema_version == 2 and tools is None:
+        tools = {"source_control": "git", "review_host": "github"}
+        config["tools"] = tools
+    if not isinstance(tools, dict):
+        raise AutoProgressError("missing table [tools]", "invalid_tools_config")
+    unexpected_tools = sorted(set(tools) - {"source_control", "review_host"})
+    if unexpected_tools:
+        raise AutoProgressError(
+            "[tools] contains unsupported fields: " + ", ".join(unexpected_tools),
+            "invalid_tools_config",
         )
-        if not isinstance(unity.get("refresh_after_checkout"), bool):
+    if tools.get("source_control") != "git":
+        raise AutoProgressError("unsupported source control adapter", "adapter_unregistered")
+    if tools.get("review_host") != "github":
+        raise AutoProgressError("unsupported review host adapter", "adapter_unregistered")
+
+    workspace = config.get("workspace")
+    if workspace is None:
+        workspace = {"additional_ignore_patterns": []}
+        config["workspace"] = workspace
+    if not isinstance(workspace, dict):
+        raise AutoProgressError("[workspace] must be a table", "invalid_workspace_config")
+    unexpected_workspace = sorted(set(workspace) - {"additional_ignore_patterns"})
+    if unexpected_workspace:
+        raise AutoProgressError(
+            "[workspace] contains unsupported fields: " + ", ".join(unexpected_workspace),
+            "invalid_workspace_config",
+        )
+    patterns = workspace.get("additional_ignore_patterns", [])
+    if not isinstance(patterns, list) or not all(isinstance(item, str) for item in patterns):
+        raise AutoProgressError(
+            "workspace.additional_ignore_patterns must be an array of strings",
+            "invalid_additional_ignore_pattern",
+        )
+    for index, pattern in enumerate(patterns):
+        if not pattern or pattern.startswith("!"):
             raise AutoProgressError(
-                "unity_mcp.refresh_after_checkout must be true or false"
+                f"workspace.additional_ignore_patterns[{index}] cannot be empty or negated",
+                "invalid_additional_ignore_pattern",
             )
+        validate_relative_path(pattern, f"workspace.additional_ignore_patterns[{index}]", allow_dot=False)
+
+    unity = require_table(config, "unity_mcp")
+    for key in unity:
+        if SENSITIVE_KEY.search(key):
+            raise AutoProgressError(
+                f"sensitive Unity MCP field is forbidden: {key}", "invalid_unity_mcp_config"
+            )
+    if schema_version == 2:
+        enabled = unity.get("enabled")
+        if not isinstance(enabled, bool):
+            raise AutoProgressError("unity_mcp.enabled must be true or false")
+        if enabled:
+            raise AutoProgressError(
+                "enabled schema-version-2 Unity MCP configuration requires human migration",
+                "unity_mcp_migration_required",
+            )
+        config["unity_mcp"] = {"mode": "disabled"}
+        return config
+
+    mode = unity.get("mode")
+    if mode not in {"disabled", "optional", "required"}:
+        raise AutoProgressError(
+            "unity_mcp.mode must be disabled, optional, or required",
+            "invalid_unity_mcp_config",
+        )
+    if mode == "disabled" and set(unity) != {"mode"}:
+        raise AutoProgressError(
+            "disabled [unity_mcp] may only contain mode", "invalid_unity_mcp_config"
+        )
+    if mode != "disabled":
+        allowed_unity = {
+            "mode",
+            "adapter",
+            "transport",
+            "url",
+            "expected_project_root",
+            "connect_timeout_seconds",
+            "operation_timeout_minutes",
+        }
+        unexpected_unity = sorted(set(unity) - allowed_unity)
+        if unexpected_unity:
+            raise AutoProgressError(
+                "[unity_mcp] contains unsupported fields: " + ", ".join(unexpected_unity),
+                "invalid_unity_mcp_config",
+            )
+        if unity.get("adapter") not in unity_mcp.ADAPTERS:
+            raise AutoProgressError("unity_mcp.adapter is not registered", "unity_adapter_unregistered")
+        if unity.get("transport") != "streamable_http":
+            raise AutoProgressError(
+                "unity_mcp.transport must be streamable_http", "invalid_unity_mcp_config"
+            )
+        try:
+            unity_mcp.validate_endpoint(unity.get("url"))
+        except (TypeError, unity_mcp.UnityMcpError) as exc:
+            reason = exc.reason_code if isinstance(exc, unity_mcp.UnityMcpError) else "invalid_unity_mcp_url"
+            raise AutoProgressError(str(exc), reason) from exc
+        validate_relative_path(
+            unity.get("expected_project_root"), "unity_mcp.expected_project_root", allow_dot=True
+        )
+        require_positive(unity, "connect_timeout_seconds", "unity_mcp")
+        require_positive(unity, "operation_timeout_minutes", "unity_mcp")
 
     return config
+
+
+def migrate_config_v3(
+    config: dict[str, Any],
+    *,
+    mode: str | None = None,
+    adapter: str = "coplaydev-unity-mcp",
+    url: str | None = None,
+    connect_timeout_seconds: int = 5,
+    operation_timeout_minutes: int = 10,
+) -> dict[str, Any]:
+    """Return a v3 copy; an enabled v2 Unity config requires explicit choices."""
+    if config.get("schema_version") != 2:
+        raise AutoProgressError("only schema_version 2 can migrate to v3", "migration_source_invalid")
+    migrated = copy.deepcopy(config)
+    legacy = require_table(migrated, "unity_mcp")
+    enabled = legacy.get("enabled")
+    if not isinstance(enabled, bool):
+        raise AutoProgressError("legacy unity_mcp.enabled must be boolean", "migration_source_invalid")
+    migrated["schema_version"] = 3
+    migrated.setdefault("tools", {"source_control": "git", "review_host": "github"})
+    migrated.setdefault("workspace", {"additional_ignore_patterns": []})
+    if not enabled:
+        migrated["unity_mcp"] = {"mode": "disabled"}
+    else:
+        if mode not in {"optional", "required"} or not url:
+            raise AutoProgressError(
+                "enabled v2 Unity MCP requires explicit mode and complete URL",
+                "unity_mcp_migration_required",
+            )
+        migrated["unity_mcp"] = {
+            "mode": mode,
+            "adapter": adapter,
+            "transport": "streamable_http",
+            "url": url,
+            "expected_project_root": legacy.get("expected_project_root", "."),
+            "connect_timeout_seconds": connect_timeout_seconds,
+            "operation_timeout_minutes": operation_timeout_minutes,
+        }
+    return validate_config(migrated)
+
+
+def _toml_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    raise AutoProgressError("unsupported value during TOML migration", "migration_render_failed")
+
+
+def dump_toml(config: dict[str, Any]) -> str:
+    """Render the supported project-policy shape deterministically."""
+    lines: list[str] = []
+    for key, value in config.items():
+        if not isinstance(value, (dict, list)):
+            lines.append(f"{key} = {_toml_value(value)}")
+    if lines:
+        lines.append("")
+    for table_name, table in config.items():
+        if not isinstance(table, dict):
+            continue
+        scalar_items = [(key, value) for key, value in table.items() if not (isinstance(value, list) and value and all(isinstance(item, dict) for item in value))]
+        array_tables = [(key, value) for key, value in table.items() if isinstance(value, list) and value and all(isinstance(item, dict) for item in value)]
+        if scalar_items:
+            lines.append(f"[{table_name}]")
+            for key, value in scalar_items:
+                lines.append(f"{key} = {_toml_value(value)}")
+            lines.append("")
+        for key, values in array_tables:
+            for item in values:
+                lines.append(f"[[{table_name}.{key}]]")
+                for item_key, item_value in item.items():
+                    lines.append(f"{item_key} = {_toml_value(item_value)}")
+                lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def normalize_remote(remote: str) -> str:
@@ -434,6 +615,8 @@ def validate_event_value(value: Any, trail: tuple[str, ...] = ()) -> None:
 
 
 def ledger_files(state_root: Path, project_id: str) -> list[Path]:
+    if not PROJECT_ID_PATTERN.fullmatch(project_id):
+        raise AutoProgressError("project_id is invalid", "invalid_project_id")
     return sorted(state_root.glob(f"{project_id}-????-??.jsonl"))
 
 
@@ -460,16 +643,6 @@ def append_ledger(
         )
 
     state_root.mkdir(parents=True, exist_ok=True)
-    for path in ledger_files(state_root, project_id):
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    prior = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if prior.get("event_id") == event["event_id"]:
-                    raise AutoProgressError(f"duplicate event_id: {event['event_id']}")
-
     destination = state_root / f"{project_id}-{local:%Y-%m}.jsonl"
     lock = state_root / f"{project_id}.lock"
     deadline = time.monotonic() + 5
@@ -482,6 +655,24 @@ def append_ledger(
                 raise AutoProgressError(f"ledger lock is busy: {lock}")
             time.sleep(0.05)
     try:
+        for path in ledger_files(state_root, project_id):
+            with path.open("r", encoding="utf-8") as handle:
+                for number, line in enumerate(handle, 1):
+                    if not line.strip():
+                        continue
+                    try:
+                        prior = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise AutoProgressError(
+                            f"invalid JSONL at {path.name}:{number}", "ledger_corrupt"
+                        ) from exc
+                    if prior.get("event_id") == event["event_id"]:
+                        if prior == event:
+                            return path
+                        raise AutoProgressError(
+                            f"duplicate event_id has different content: {event['event_id']}",
+                            "ledger_event_conflict",
+                        )
         with destination.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(encoded + "\n")
             handle.flush()
@@ -753,6 +944,15 @@ def parser() -> argparse.ArgumentParser:
     validate = subcommands.add_parser("validate-config")
     validate.add_argument("--config", type=Path, required=True)
 
+    migrate = subcommands.add_parser("migrate-config-v3")
+    migrate.add_argument("--config", type=Path, required=True)
+    migrate.add_argument("--mode", choices=("disabled", "optional", "required"))
+    migrate.add_argument("--adapter", default="coplaydev-unity-mcp")
+    migrate.add_argument("--url")
+    migrate.add_argument("--connect-timeout-seconds", type=int, default=5)
+    migrate.add_argument("--operation-timeout-minutes", type=int, default=10)
+    migrate.add_argument("--write", action="store_true")
+
     new_id = subcommands.add_parser("new-id")
     new_id.add_argument(
         "--kind", choices=sorted(ID_KINDS), default="improvement"
@@ -788,6 +988,29 @@ def parser() -> argparse.ArgumentParser:
     summary = subcommands.add_parser("status")
     summary.add_argument("--project-id", required=True)
     summary.add_argument("--state-root", type=Path, default=default_state_root())
+
+    prepare = subcommands.add_parser("prepare-run")
+    prepare.add_argument("--repo", type=Path, required=True)
+    prepare.add_argument("--run-id", required=True)
+    prepare.add_argument(
+        "--task-type", choices=("implement-batch", "discover-improvements"), required=True
+    )
+    prepare.add_argument("--base-branch", required=True)
+    prepare.add_argument("--state-root", type=Path, default=default_state_root())
+    prepare.add_argument("--gh", default="gh")
+    prepare.add_argument("--skip-github", action="store_true")
+    prepare.add_argument("--no-claim-allowance", action="store_true")
+
+    finish = subcommands.add_parser("finish-run")
+    finish.add_argument("--project-id", required=True)
+    finish.add_argument("--run-id", required=True)
+    finish.add_argument("--manifest", type=Path, required=True)
+    finish.add_argument("--state-root", type=Path, default=default_state_root())
+
+    recover = subcommands.add_parser("recover-run")
+    recover.add_argument("--project-id", required=True)
+    recover.add_argument("--run-id", required=True)
+    recover.add_argument("--state-root", type=Path, default=default_state_root())
     return result
 
 
@@ -797,6 +1020,34 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.command == "validate-config":
             validate_config(load_config(arguments.config.resolve()))
             output: Any = {"ok": True, "config": str(arguments.config)}
+        elif arguments.command == "migrate-config-v3":
+            path = arguments.config.resolve()
+            before = path.read_text(encoding="utf-8")
+            migrated = migrate_config_v3(
+                load_config(path),
+                mode=arguments.mode,
+                adapter=arguments.adapter,
+                url=arguments.url,
+                connect_timeout_seconds=arguments.connect_timeout_seconds,
+                operation_timeout_minutes=arguments.operation_timeout_minutes,
+            )
+            after = dump_toml(migrated)
+            diff = "".join(
+                difflib.unified_diff(
+                    before.splitlines(keepends=True),
+                    after.splitlines(keepends=True),
+                    fromfile=str(arguments.config),
+                    tofile=str(arguments.config),
+                )
+            )
+            if arguments.write:
+                temporary = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+                try:
+                    temporary.write_text(after, encoding="utf-8", newline="\n")
+                    os.replace(temporary, path)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            output = {"ok": True, "written": arguments.write, "diff": diff}
         elif arguments.command == "new-id":
             output = {"id": make_id(arguments.kind, arguments.timezone)}
         elif arguments.command == "project-id":
@@ -838,18 +1089,56 @@ def main(argv: list[str] | None = None) -> int:
             }
         elif arguments.command == "status":
             paths = ledger_files(arguments.state_root.resolve(), arguments.project_id)
+            paths += ledger_files(arguments.state_root.resolve() / "ledger", arguments.project_id)
             output = {
                 "ok": True,
                 "project_id": arguments.project_id,
                 "files": len(paths),
                 **summarize_events(read_events(paths)),
             }
+        elif arguments.command == "prepare-run":
+            import workflow
+
+            output = workflow.prepare_run(
+                arguments.repo,
+                arguments.run_id,
+                arguments.task_type,
+                arguments.base_branch,
+                arguments.state_root.resolve(),
+                gh_program=arguments.gh,
+                skip_github=arguments.skip_github,
+                claim_allowance=not arguments.no_claim_allowance,
+            )
+        elif arguments.command == "finish-run":
+            import workflow
+
+            output = workflow.finish_run(
+                arguments.project_id,
+                arguments.run_id,
+                arguments.manifest,
+                arguments.state_root.resolve(),
+            )
+        elif arguments.command == "recover-run":
+            import workflow
+
+            output = workflow.recover_run(
+                arguments.project_id,
+                arguments.run_id,
+                arguments.state_root.resolve(),
+            )
         else:
             raise AssertionError(arguments.command)
         print(json.dumps(output, ensure_ascii=False, indent=2))
         return 0 if not isinstance(output, dict) or output.get("ok", True) else 2
     except (AutoProgressError, OSError, subprocess.TimeoutExpired) as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        reason = exc.reason_code if isinstance(exc, AutoProgressError) else "auto_progress_error"
+        print(
+            json.dumps(
+                {"ok": False, "reason_code": reason, "summary": str(exc)},
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
         return 2
 
 

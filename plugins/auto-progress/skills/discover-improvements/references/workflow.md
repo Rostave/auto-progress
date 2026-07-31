@@ -20,7 +20,9 @@ An existing claim for the same run and task type is a safe retry. Any other clai
 
 ## Worktree and slice
 
-Fetch `origin`, then create a temporary lightweight worktree and branch:
+Call `prepare-run` with the registered base branch and task type `discover-improvements`. It fetches `origin`, freezes and validates the base policy, claims the allowance, and creates the temporary lightweight worktree and branch. Treat its structured result as authoritative; do not reproduce the Git transition in model reasoning.
+
+Use branch:
 
 ```text
 codex/auto-progress/run-yyyy.mm.dd-xxxxxxxx-discover-improvements

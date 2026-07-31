@@ -1,6 +1,6 @@
 {
   "name": "auto-progress",
-  "version": "0.1.0+codex.20260730172724",
+  "version": "0.2.0+codex.20260731191238",
   "description": "Guarded Unity C# improvement discovery and batch maintenance with human-reviewed pull requests.",
   "author": {
     "name": "AutoProgress Contributors"

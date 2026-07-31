@@ -1,0 +1,14 @@
+{
+  "improvements": [
+    {
+      "id": "IMP-YYYY.MM.DD-xxxxxxxx",
+      "summary": "Describe the user-visible or maintainer-visible result.",
+      "acceptance": "Describe how the result is accepted.",
+      "design_tradeoffs": "Describe important design choices and limitations.",
+      "expected_paths": [
+        "Assets/Example.cs"
+      ]
+    }
+  ],
+  "run_record_path": "docs/auto-progress/runs/RUN-YYYY.MM.DD-xxxxxxxx.md"
+}
