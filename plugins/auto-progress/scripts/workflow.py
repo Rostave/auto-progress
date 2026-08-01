@@ -578,6 +578,39 @@ def _branch_name(run_id: str, task_type: str) -> str:
     return f"codex/auto-progress/run-{suffix}-{task_type}"
 
 
+def _retire_legacy_discovery_worktree(
+    repo: Path, store: StateStore, project_id: str, patterns: list[str]
+) -> bool:
+    """Remove the old managed discovery checkout only when Git proves it is clean."""
+    workspace = (store.root / "workspaces" / project_id / "discovery").resolve()
+    if not workspace.exists():
+        return False
+    listed = _git(repo, "worktree", "list", "--porcelain").stdout.splitlines()
+    registered = {
+        str(Path(line.removeprefix("worktree ")).resolve()).casefold()
+        for line in listed
+        if line.startswith("worktree ")
+    }
+    if str(workspace).casefold() not in registered:
+        raise auto_progress.AutoProgressError(
+            "Legacy discovery workspace exists but is not a registered Git worktree",
+            "legacy_discovery_workspace_needs_attention",
+        )
+    status = inspect_workspace(workspace, patterns)
+    if status["blocking"] or status["operations"]:
+        raise auto_progress.AutoProgressError(
+            "Legacy discovery worktree contains changes and was preserved",
+            "legacy_discovery_workspace_needs_attention",
+        )
+    removed = _git(repo, "worktree", "remove", str(workspace), check=False)
+    if removed.returncode != 0:
+        raise auto_progress.AutoProgressError(
+            "Unable to retire the legacy discovery worktree safely",
+            "legacy_discovery_workspace_needs_attention",
+        )
+    return True
+
+
 def prepare_run(
     repo: Path,
     run_id: str,
@@ -672,7 +705,7 @@ def prepare_run(
             "original": {"branch": original_branch, "head": original_head},
             "git_identity": _identity(repo),
             "branch": branch,
-            "workspace_mode": "worktree" if task_type == "discover-improvements" else "primary",
+            "workspace_mode": "primary",
             "workspace_path": None,
             "workspace_handle": hashlib.sha256(f"{project_id}\n{run_id}\nworkspace".encode()).hexdigest()[:20],
             "checkpoints": {},
@@ -688,23 +721,20 @@ def prepare_run(
         store.save(state)
 
         patterns = config["workspace"]["additional_ignore_patterns"]
-        if task_type == "discover-improvements":
-            # Discovery isolates all edits; the original checkout may contain human work.
-            admission = {"operations": _active_operations(repo), "ignored_untracked": [], "blocking": []}
-            if admission["operations"]:
-                raise auto_progress.AutoProgressError("Git operation is active", "active_git_operation")
-        else:
-            admission = inspect_workspace(repo, patterns)
-            if admission["operations"]:
-                raise auto_progress.AutoProgressError("Git operation is active", "active_git_operation")
-            if admission["blocking"]:
-                raise auto_progress.AutoProgressError("Workspace contains unapproved changes", "dirty_workspace")
-            collisions = _target_collisions(repo, base_revision, admission["ignored_untracked"])
-            if collisions:
-                raise auto_progress.AutoProgressError(
-                    "Additional-ignore path collides with the base snapshot: " + ", ".join(collisions[:20]),
-                    "untracked_target_collision",
-                )
+        retired_legacy_workspace = _retire_legacy_discovery_worktree(
+            repo, store, project_id, patterns
+        )
+        admission = inspect_workspace(repo, patterns)
+        if admission["operations"]:
+            raise auto_progress.AutoProgressError("Git operation is active", "active_git_operation")
+        if admission["blocking"]:
+            raise auto_progress.AutoProgressError("Workspace contains unapproved changes", "dirty_workspace")
+        collisions = _target_collisions(repo, base_revision, admission["ignored_untracked"])
+        if collisions:
+            raise auto_progress.AutoProgressError(
+                "Additional-ignore path collides with the base snapshot: " + ", ".join(collisions[:20]),
+                "untracked_target_collision",
+            )
 
         existing_branch = _git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}", check=False)
         if existing_branch.returncode == 0:
@@ -725,39 +755,10 @@ def prepare_run(
         created = False
         workspace = repo
         try:
-            if task_type == "discover-improvements":
-                workspace = store.root / "workspaces" / project_id / "discovery"
-                if workspace.exists():
-                    parked = inspect_workspace(workspace, patterns)
-                    if parked["blocking"] or parked["operations"]:
-                        raise auto_progress.AutoProgressError(
-                            "Persistent discovery worktree needs attention",
-                            "persistent_worktree_not_clean",
-                        )
-                    detached = _git(workspace, "switch", "--detach", base_revision, check=False)
-                    switched = (
-                        _git(workspace, "switch", "-c", branch, base_revision, check=False)
-                        if detached.returncode == 0 else detached
-                    )
-                    if detached.returncode != 0 or switched.returncode != 0:
-                        raise auto_progress.AutoProgressError(
-                            "Unable to reuse discovery worktree", "admit_workspace_failed"
-                        )
-                else:
-                    workspace.parent.mkdir(parents=True, exist_ok=True)
-                    added = _git(repo, "worktree", "add", "--detach", str(workspace), base_revision, check=False)
-                    switched = (
-                        _git(workspace, "switch", "-c", branch, base_revision, check=False)
-                        if added.returncode == 0 else added
-                    )
-                    if added.returncode != 0 or switched.returncode != 0:
-                        raise auto_progress.AutoProgressError("Unable to create discovery worktree", "admit_workspace_failed")
-                created = True
-            else:
-                switched = _git(repo, "switch", "-c", branch, base_revision, check=False)
-                if switched.returncode != 0:
-                    raise auto_progress.AutoProgressError("Unable to create run branch", "admit_workspace_failed")
-                created = True
+            switched = _git(repo, "switch", "-c", branch, base_revision, check=False)
+            if switched.returncode != 0:
+                raise auto_progress.AutoProgressError("Unable to create run branch", "admit_workspace_failed")
+            created = True
             state["workspace_path"] = str(workspace.resolve())
             state["recovery_obligations"] = ["restore_workspace"]
             store.save(state)
@@ -774,6 +775,7 @@ def prepare_run(
                     "workspace_handle": state["workspace_handle"],
                     "branch": branch,
                     "ignored_untracked": target["ignored_untracked"],
+                    "retired_legacy_discovery_worktree": retired_legacy_workspace,
                 },
             )
             store.save(state)
@@ -936,30 +938,71 @@ def _index_snapshot(
                 entry["old_path"] = old_path.replace("\\", "/")
             entries.append(entry)
         numstat_raw = _git(repo, "diff", "--cached", "--numstat", "-z", base_revision, env=env).stdout
-        changed_lines = 0
-        for record in numstat_raw.split("\0"):
-            fields = record.split("\t")
-            if len(fields) >= 3:
-                for value in fields[:2]:
-                    if value.isdigit():
-                        changed_lines += int(value)
-        canonical = json.dumps(entries, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        changed_paths = sorted(
-            {
-                path
-                for item in entries
-                for path in (item["path"], item.get("old_path"))
-                if path
-            }
-        )
-        return {
-            "fingerprint": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
-            "entries": entries,
-            "changed_paths": changed_paths,
-            "changed_lines": changed_lines,
-            "all_files": len(entries),
-            "csharp_files": sum(item["path"].lower().endswith(".cs") for item in entries),
+        numstat_parts = numstat_raw.split("\0")
+        stats: list[tuple[int, int]] = []
+        cursor = 0
+        while cursor < len(numstat_parts) and numstat_parts[cursor]:
+            fields = numstat_parts[cursor].split("\t")
+            cursor += 1
+            if len(fields) < 3:
+                continue
+            added = int(fields[0]) if fields[0].isdigit() else 0
+            deleted = int(fields[1]) if fields[1].isdigit() else 0
+            if not fields[2] and cursor + 1 < len(numstat_parts):
+                cursor += 2
+            stats.append((added, deleted))
+        for entry, (added, deleted) in zip(entries, stats, strict=False):
+            entry["added_lines"] = added
+            entry["deleted_lines"] = deleted
+        return _snapshot_from_entries(entries)
+
+
+def _snapshot_from_entries(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    canonical = json.dumps(entries, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    changed_paths = sorted(
+        {
+            path
+            for item in entries
+            for path in (item["path"], item.get("old_path"))
+            if path
         }
+    )
+    return {
+        "fingerprint": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "entries": entries,
+        "changed_paths": changed_paths,
+        "changed_lines": sum(
+            int(item.get("added_lines", 0)) + int(item.get("deleted_lines", 0))
+            for item in entries
+        ),
+        "all_files": len(entries),
+        "csharp_files": sum(item["path"].lower().endswith(".cs") for item in entries),
+    }
+
+
+def _entry_paths(entry: dict[str, Any]) -> set[str]:
+    return {
+        path
+        for path in (entry.get("path"), entry.get("old_path"))
+        if isinstance(path, str) and path
+    }
+
+
+def _partition_snapshot(
+    snapshot: dict[str, Any], target_paths: set[str]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    target_entries: list[dict[str, Any]] = []
+    outside_entries: list[dict[str, Any]] = []
+    for entry in snapshot["entries"]:
+        paths = _entry_paths(entry)
+        overlap = paths & target_paths
+        if overlap and overlap != paths:
+            raise auto_progress.AutoProgressError(
+                "a changed file operation crosses target and non-target paths",
+                "human_change_target_overlap",
+            )
+        (target_entries if paths and paths <= target_paths else outside_entries).append(entry)
+    return _snapshot_from_entries(target_entries), _snapshot_from_entries(outside_entries)
 
 
 def _policy_path_match(path: str, patterns: list[str]) -> bool:
@@ -974,7 +1017,12 @@ def _policy_path_match(path: str, patterns: list[str]) -> bool:
 
 
 def _validate_manifest(
-    manifest: dict[str, Any], task_type: str, snapshot: dict[str, Any], config: dict[str, Any]
+    manifest: dict[str, Any],
+    task_type: str,
+    snapshot: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    allow_outside_changes: bool = False,
 ) -> dict[str, Any]:
     allowed_top = {"improvements", "items", "run_record_path", "template_id"}
     forbidden = sorted(set(manifest) - allowed_top)
@@ -1035,11 +1083,11 @@ def _validate_manifest(
         raise auto_progress.AutoProgressError(
             "run_record_path must be a Markdown file under docs/auto-progress/runs", "manifest_invalid"
         )
-    actual = set(snapshot["changed_paths"])
     expected_all = set(owned)
-    if actual != expected_all:
-        missing = sorted(expected_all - actual)
-        unexpected = sorted(actual - expected_all)
+    target_snapshot, outside_snapshot = _partition_snapshot(snapshot, expected_all)
+    missing = sorted(expected_all - set(target_snapshot["changed_paths"]))
+    unexpected = outside_snapshot["changed_paths"]
+    if missing or (unexpected and not allow_outside_changes):
         raise auto_progress.AutoProgressError(
             f"manifest path mismatch; missing={missing[:20]}, unexpected={unexpected[:20]}",
             "manifest_mismatch",
@@ -1055,7 +1103,7 @@ def _validate_manifest(
         document_roots.append(config["paths"]["rejection_rules"])
     out_of_scope = [
         path
-        for path in actual
+        for path in target_snapshot["changed_paths"]
         if (not _policy_path_match(path, allowed + document_roots)) or _policy_path_match(path, excluded)
     ]
     if out_of_scope:
@@ -1068,7 +1116,7 @@ def _validate_manifest(
         "changed_lines": budget.get("changed_lines_hard", budget.get("changed_lines_absolute")),
         "all_files": budget.get("all_files_hard", budget.get("all_files_absolute")),
     }
-    exceeded = [name for name, limit in limits.items() if snapshot[name] > limit]
+    exceeded = [name for name, limit in limits.items() if target_snapshot[name] > limit]
     if exceeded:
         raise auto_progress.AutoProgressError(
             "change budget exceeded: " + ", ".join(exceeded), "budget_exceeded"
@@ -1079,7 +1127,148 @@ def _validate_manifest(
         "template_id": manifest.get("template_id"),
         "ownership": owned,
         "budget_limits": limits,
+        "target_snapshot": target_snapshot,
+        "outside_snapshot": outside_snapshot,
     }
+
+
+def _capture_bypass_changes(
+    state: dict[str, Any], workspace: Path, outside_snapshot: dict[str, Any]
+) -> dict[str, Any]:
+    paths = set(outside_snapshot["changed_paths"])
+    if not paths:
+        if _git(workspace, "diff", "--cached", "--quiet", check=False).returncode != 0:
+            raise auto_progress.AutoProgressError(
+                "target paths must not be staged before deterministic delivery",
+                "staged_target_changes_present",
+            )
+        return {"paths": [], "fingerprint": outside_snapshot["fingerprint"], "unstaged_paths": []}
+    if state["task_type"] != "implement-batch":
+        raise auto_progress.AutoProgressError(
+            "discovery cannot bypass source changes", "manifest_mismatch"
+        )
+
+    raw = _git(workspace, "status", "--porcelain=v1", "-z", "--untracked-files=all").stdout
+    status_entries = _parse_status(raw)
+    staged_paths: set[str] = set()
+    for entry in status_entries:
+        entry_paths = {entry["path"], *([entry["source_path"]] if entry.get("source_path") else [])}
+        if entry_paths & paths and entry["xy"] != "??" and entry["xy"][0] != " ":
+            staged_paths.update(entry_paths & paths)
+    if staged_paths:
+        unstaged = _git(
+            workspace,
+            "restore",
+            "--staged",
+            "--",
+            *sorted(staged_paths),
+            check=False,
+        )
+        if unstaged.returncode != 0:
+            raise auto_progress.AutoProgressError(
+                "unable to unstage non-target human changes",
+                "bypass_unstage_failed",
+            )
+    if _git(workspace, "diff", "--cached", "--quiet", check=False).returncode != 0:
+        raise auto_progress.AutoProgressError(
+            "target paths must not be staged before deterministic delivery",
+            "staged_target_changes_present",
+        )
+
+    original = state["original"]
+    original_head = original["head"]
+    original_branch = original.get("branch")
+    if original_branch:
+        current_original = _git(
+            workspace, "rev-parse", f"refs/heads/{original_branch}", check=False
+        )
+        if current_original.returncode != 0 or current_original.stdout.strip() != original_head:
+            raise auto_progress.AutoProgressError(
+                "original branch moved during the workspace lease",
+                "original_branch_moved",
+            )
+    compatible = _git(
+        workspace,
+        "diff",
+        "--quiet",
+        state["base_revision"],
+        original_head,
+        "--",
+        *sorted(paths),
+        check=False,
+    )
+    if compatible.returncode != 0:
+        raise auto_progress.AutoProgressError(
+            "non-target human changes cannot be carried safely to the original revision",
+            "bypass_restore_conflict",
+        )
+    return {
+        "paths": sorted(paths),
+        "fingerprint": outside_snapshot["fingerprint"],
+        "unstaged_paths": sorted(staged_paths),
+    }
+
+
+def _verify_frozen_bypass(
+    state: dict[str, Any], workspace: Path, target_paths: set[str]
+) -> dict[str, Any]:
+    original = state["original"]
+    if original.get("branch"):
+        current_original = _git(
+            workspace,
+            "rev-parse",
+            f"refs/heads/{original['branch']}",
+            check=False,
+        )
+        if current_original.returncode != 0 or current_original.stdout.strip() != original["head"]:
+            raise auto_progress.AutoProgressError(
+                "original branch moved during the workspace lease",
+                "original_branch_moved",
+            )
+    snapshot = _index_snapshot(
+        workspace,
+        state["base_revision"],
+        state["config"]["workspace"]["additional_ignore_patterns"],
+    )
+    target_snapshot, outside_snapshot = _partition_snapshot(snapshot, target_paths)
+    bypass = state.get("bypass_changes", {"paths": [], "fingerprint": _snapshot_from_entries([])["fingerprint"]})
+    if (
+        outside_snapshot["changed_paths"] != bypass.get("paths", [])
+        or outside_snapshot["fingerprint"] != bypass.get("fingerprint")
+    ):
+        raise auto_progress.AutoProgressError(
+            "non-target changes appeared or changed after finish-run started",
+            "bypass_content_changed",
+        )
+    return target_snapshot
+
+
+def _verify_delivery_content(
+    state: dict[str, Any],
+    workspace: Path,
+    allowed_target_paths: set[str],
+    deterministic_paths: set[str],
+) -> dict[str, Any]:
+    target_snapshot = _verify_frozen_bypass(state, workspace, allowed_target_paths)
+    unexpected = sorted(set(target_snapshot["changed_paths"]) - allowed_target_paths)
+    if unexpected:
+        raise auto_progress.AutoProgressError(
+            "new target-adjacent changes appeared during delivery: " + ", ".join(unexpected[:20]),
+            "content_changed",
+        )
+    model_entries = [
+        entry
+        for entry in target_snapshot["entries"]
+        if not (_entry_paths(entry) & deterministic_paths)
+    ]
+    if _snapshot_from_entries(model_entries)["fingerprint"] != state.get(
+        "validated_content_fingerprint"
+    ):
+        raise auto_progress.AutoProgressError(
+            "model content no longer matches the validated fingerprint",
+            "content_changed",
+        )
+    return target_snapshot
 
 
 def _validate_improvement_documents(
@@ -1232,7 +1421,14 @@ def _check_review_overlap(
             )
 
 
-def _append_material_events(state: dict[str, Any], store: StateStore, revision: str, review: dict[str, Any]) -> None:
+def _append_material_events(
+    state: dict[str, Any],
+    store: StateStore,
+    revision: str,
+    review: dict[str, Any] | None,
+    *,
+    include_commit_events: bool = True,
+) -> None:
     config = state["config"]
     timezone = config["project"]["timezone"]
     local = datetime.now(ZoneInfo(timezone))
@@ -1253,18 +1449,31 @@ def _append_material_events(state: dict[str, Any], store: StateStore, revision: 
         return f"EVT-{run_date}-{digest}"
 
     item_revisions = state.get("item_revisions", {})
-    events = [
-        {
-            **base,
-            "event_id": event_id("commit_created", improvement_id),
-            "event_type": "commit_created",
-            "improvement_id": improvement_id,
-            "revision": item_revision[:12],
-        }
-        for improvement_id, item_revision in sorted(item_revisions.items())
-    ]
-    events.extend(
-        [
+    events = []
+    if include_commit_events:
+        events.extend(
+            {
+                **base,
+                "event_id": event_id("commit_created", improvement_id),
+                "event_type": "commit_created",
+                "improvement_id": improvement_id,
+                "revision": item_revision[:12],
+            }
+            for improvement_id, item_revision in sorted(item_revisions.items())
+        )
+        if state["task_type"] == "implement-batch":
+            events.extend(
+                {
+                    **base,
+                    "event_id": event_id("improvement_implemented", improvement_id),
+                    "event_type": "improvement_implemented",
+                    "improvement_id": improvement_id,
+                    "revision": item_revision[:12],
+                }
+                for improvement_id, item_revision in sorted(item_revisions.items())
+            )
+    if review is not None:
+        events.extend([
             {
                 **base,
                 "event_id": event_id("branch_pushed"),
@@ -1279,19 +1488,7 @@ def _append_material_events(state: dict[str, Any], store: StateStore, revision: 
                 "pull_request": review.get("number"),
                 "improvement_ids": sorted(item_revisions),
             },
-        ]
-    )
-    if state["task_type"] == "implement-batch" and state.get("status_revision"):
-        events.extend(
-            {
-                **base,
-                "event_id": event_id("improvement_implemented", improvement_id),
-                "event_type": "improvement_implemented",
-                "improvement_id": improvement_id,
-                "revision": str(state["status_revision"])[:12],
-            }
-            for improvement_id in sorted(item_revisions)
-        )
+        ])
     for event in events:
         auto_progress.append_ledger(event, state["project_id"], ledger_root, timezone)
 
@@ -1350,38 +1547,31 @@ def _resume_record_change(
         raise auto_progress.AutoProgressError(
             "existing run record does not match deterministic output", "run_record_content_mismatch"
         )
-    snapshot = _index_snapshot(
-        workspace,
-        state["base_revision"],
-        state["config"]["workspace"]["additional_ignore_patterns"],
-    )
-    without_record = [
-        item for item in snapshot["entries"] if item["path"] != manifest["run_record_path"]
-    ]
-    canonical = json.dumps(
-        without_record, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-    )
-    if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != state.get(
-        "validated_content_fingerprint"
-    ):
-        raise auto_progress.AutoProgressError(
-            "content no longer matches the validated fingerprint", "content_changed"
-        )
     revisions = _logged_item_commits(state, workspace)
     if revisions is None:
         return None
     items = manifest["improvements"]
+    deterministic_paths = {manifest["run_record_path"]}
+    allowed_target_paths = set(manifest["ownership"]) | deterministic_paths
     for index, item in enumerate(items):
+        item_status_paths = _transition_improvement_implemented(
+            state, workspace, item
+        )
+        deterministic_paths.update(item_status_paths)
+        allowed_target_paths.update(item_status_paths)
+        _verify_delivery_content(
+            state, workspace, allowed_target_paths, deterministic_paths
+        )
         if item["id"] in revisions:
             continue
         if _identity(workspace) != state["git_identity"]:
             raise auto_progress.AutoProgressError(
                 "Git identity changed after preparation", "identity_mismatch"
             )
-        paths = list(item["expected_paths"])
+        paths = list(item["expected_paths"]) + item_status_paths
         if index == 0:
             paths.append(manifest["run_record_path"])
-        _git(workspace, "add", "--", *paths)
+        _git(workspace, "add", "-A", "--", *paths)
         committed = _git(
             workspace,
             "commit",
@@ -1401,17 +1591,17 @@ def _resume_record_change(
             {"revision": revisions[item["id"]], "improvement_id": item["id"], "recovered": True},
         )
         store.save(state)
-    admission = inspect_workspace(
-        workspace, state["config"]["workspace"]["additional_ignore_patterns"]
+    _verify_delivery_content(
+        state, workspace, allowed_target_paths, deterministic_paths
     )
-    if admission["blocking"] or admission["operations"]:
+    if _active_operations(workspace):
         return None
     facts = dict(state["delivery_facts"])
     final_revision = _git(workspace, "rev-parse", "HEAD").stdout.strip()
     facts["revision"] = final_revision
     facts["work_branch"] = state["branch"]
     facts["improvements"] = {
-        item["id"]: {"result": "succeeded", "revision": revisions[item["id"]]}
+        item["id"]: {"result": "implemented", "revision": revisions[item["id"]]}
         for item in items
     }
     template = (
@@ -1424,91 +1614,61 @@ def _resume_record_change(
     return revisions
 
 
-def _mark_improvements_implemented(
-    state: dict[str, Any], workspace: Path, store: StateStore
-) -> str | None:
-    """Rename all delivered improvement documents in one post-review commit."""
+def _transition_improvement_implemented(
+    state: dict[str, Any], workspace: Path, item: dict[str, Any]
+) -> list[str]:
+    """Prepare one deterministic queued-to-implemented transition for its item commit."""
     if state["task_type"] != "implement-batch":
-        return None
-    manifest = state.get("delivery_manifest", {})
-    changed_paths: list[str] = []
-    for item in manifest.get("improvements", []):
-        improvement_id = item["id"]
-        matches: list[Path] = []
-        for root_key in ("ideas", "directed"):
-            root = workspace / state["config"]["paths"][root_key]
-            for name in (f"{improvement_id}.md", f"{improvement_id}--queued.md"):
-                candidate = root / name
-                if candidate.exists():
-                    matches.append(candidate)
-        implemented_matches = [
-            workspace / state["config"]["paths"][root_key] / f"{improvement_id}--implemented.md"
-            for root_key in ("ideas", "directed")
-        ]
-        if not matches and any(path.exists() for path in implemented_matches):
-            continue
-        if not matches:
-            continue
-        if len(matches) != 1:
+        return []
+    improvement_id = item["id"]
+    queued_matches: list[Path] = []
+    implemented_matches: list[Path] = []
+    for root_key in ("ideas", "directed"):
+        root = workspace / state["config"]["paths"][root_key]
+        for name in (f"{improvement_id}.md", f"{improvement_id}--queued.md"):
+            candidate = root / name
+            if candidate.exists():
+                queued_matches.append(candidate)
+        implemented = root / f"{improvement_id}--implemented.md"
+        if implemented.exists():
+            implemented_matches.append(implemented)
+    if not queued_matches and len(implemented_matches) == 1:
+        destination = implemented_matches[0]
+        text = destination.read_text(encoding="utf-8")
+        if not re.search(r"(?m)^state:\s*implemented\s*$", text):
             raise auto_progress.AutoProgressError(
-                f"multiple improvement documents found for {improvement_id}",
-                "improvement_document_ambiguous",
-            )
-        source = matches[0]
-        text = source.read_text(encoding="utf-8")
-        if not re.search(r"(?m)^state:\s*queued\s*$", text):
-            raise auto_progress.AutoProgressError(
-                f"{source.relative_to(workspace)} is not queued",
+                f"{destination.relative_to(workspace)} is not implemented",
                 "improvement_state_invalid",
             )
-        updated = re.sub(
-            r"(?m)^state:\s*queued\s*$", "state: implemented", text, count=1
-        )
-        destination = source.with_name(f"{improvement_id}--implemented.md")
-        source.write_text(updated, encoding="utf-8", newline="\n")
-        source.rename(destination)
-        changed_paths.extend(
-            [
-                source.relative_to(workspace).as_posix(),
-                destination.relative_to(workspace).as_posix(),
-            ]
-        )
-    if not changed_paths:
-        return None
-    if _identity(workspace) != state["git_identity"]:
+        legacy = destination.with_name(f"{improvement_id}.md")
+        queued = destination.with_name(f"{improvement_id}--queued.md")
+        return [
+            legacy.relative_to(workspace).as_posix(),
+            queued.relative_to(workspace).as_posix(),
+            destination.relative_to(workspace).as_posix(),
+        ]
+    if len(queued_matches) != 1 or implemented_matches:
         raise auto_progress.AutoProgressError(
-            "Git identity changed before status transition", "identity_mismatch"
+            f"expected one queued improvement document for {improvement_id}",
+            "improvement_document_ambiguous",
         )
-    _git(workspace, "add", "-A", "--", *sorted(set(changed_paths)))
-    count = len(manifest.get("improvements", []))
-    committed = _git(
-        workspace,
-        "commit",
-        "-m",
-        f"AutoProgress: mark {count} improvements implemented ({state['run_id']})",
-        check=False,
-    )
-    if committed.returncode != 0:
+    source = queued_matches[0]
+    text = source.read_text(encoding="utf-8")
+    if not re.search(r"(?m)^state:\s*queued\s*$", text):
         raise auto_progress.AutoProgressError(
-            "unable to commit improvement status transition", "status_transition_failed"
+            f"{source.relative_to(workspace)} is not queued",
+            "improvement_state_invalid",
         )
-    revision = _git(workspace, "rev-parse", "HEAD").stdout.strip()
-    pushed = _git(
-        workspace, "push", "origin", f"HEAD:refs/heads/{state['branch']}", check=False
+    destination = source.with_name(f"{improvement_id}--implemented.md")
+    updated = re.sub(
+        r"(?m)^state:\s*queued\s*$", "state: implemented", text, count=1
     )
-    if pushed.returncode != 0:
-        raise auto_progress.AutoProgressError(
-            "unable to publish improvement status transition", "status_transition_publish_failed"
-        )
-    state["status_revision"] = revision
-    state["change_handle"] = revision
-    _checkpoint(
-        state,
-        "mark_implemented",
-        {"revision": revision, "paths": sorted(set(changed_paths))},
-    )
-    store.save(state)
-    return revision
+    source.write_text(updated, encoding="utf-8", newline="\n")
+    source.rename(destination)
+    return [
+        source.relative_to(workspace).as_posix(),
+        destination.relative_to(workspace).as_posix(),
+    ]
 
 
 def _status_transition_paths(state: dict[str, Any], workspace: Path) -> list[str]:
@@ -1563,15 +1723,33 @@ def finish_run(
         snapshot = _index_snapshot(workspace, state["base_revision"], additional_ignores)
         if not snapshot["entries"]:
             raise auto_progress.AutoProgressError("there are no changes to deliver", "empty_change")
-        manifest = _validate_manifest(manifest_raw, state["task_type"], snapshot, config)
+        manifest = _validate_manifest(
+            manifest_raw,
+            state["task_type"],
+            snapshot,
+            config,
+            allow_outside_changes=state["task_type"] == "implement-batch",
+        )
+        target_snapshot = manifest.pop("target_snapshot")
+        outside_snapshot = manifest.pop("outside_snapshot")
         _validate_improvement_documents(
             workspace, manifest, state["task_type"], config
         )
         state["delivery_manifest"] = manifest
+        state["bypass_changes"] = _capture_bypass_changes(
+            state, workspace, outside_snapshot
+        )
+        state["validated_content_fingerprint"] = target_snapshot["fingerprint"]
+        _checkpoint(
+            state,
+            "freeze_bypass_changes",
+            {
+                "paths": state["bypass_changes"]["paths"],
+                "unstaged_paths": state["bypass_changes"]["unstaged_paths"],
+                "content_fingerprint": state["bypass_changes"]["fingerprint"],
+            },
+        )
         store.save(state)
-        staged = _git(workspace, "diff", "--cached", "--quiet", check=False)
-        if staged.returncode != 0:
-            raise auto_progress.AutoProgressError("real Git index must remain empty", "staged_changes_present")
 
         final_validation = (
             {"passed": True, "skipped": True, "reason": "discovery_does_not_run_csharp_validation", "steps": []}
@@ -1587,10 +1765,10 @@ def finish_run(
                 checkpoint="baseline_validation", recovery="recover-run",
                 diagnostic_ref=final_validation["steps"][-1].get("diagnostic_ref") if final_validation["steps"] else None,
             )
-        validated = _index_snapshot(workspace, state["base_revision"], additional_ignores)
-        if validated["fingerprint"] != snapshot["fingerprint"]:
+        target_paths = set(manifest["ownership"])
+        validated = _verify_frozen_bypass(state, workspace, target_paths)
+        if validated["fingerprint"] != state["validated_content_fingerprint"]:
             raise auto_progress.AutoProgressError("content changed during final validation", "content_changed")
-        state["validated_content_fingerprint"] = validated["fingerprint"]
         _checkpoint(state, "final_validation", {"validation": final_validation, "content_fingerprint": validated["fingerprint"]})
         store.save(state)
 
@@ -1603,7 +1781,7 @@ def finish_run(
             if state["task_type"] == "discover-improvements"
             else unity_mcp.run_verification(config["unity_mcp"], workspace, validated["fingerprint"])
         )
-        after_unity = _index_snapshot(workspace, state["base_revision"], additional_ignores)
+        after_unity = _verify_frozen_bypass(state, workspace, target_paths)
         if after_unity["fingerprint"] != validated["fingerprint"]:
             raise auto_progress.AutoProgressError("Unity validation changed tracked content", "content_changed")
         _checkpoint(state, "unity_validation", unity)
@@ -1634,11 +1812,11 @@ def finish_run(
         if record_path.exists():
             raise auto_progress.AutoProgressError("run record already exists", "run_record_exists")
         record_path.write_text(run_record["body"], encoding="utf-8", newline="\n")
-        with_record = _index_snapshot(workspace, state["base_revision"], additional_ignores)
-        without_record_entries = [item for item in with_record["entries"] if item["path"] != manifest["run_record_path"]]
-        canonical = json.dumps(without_record_entries, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != validated["fingerprint"]:
-            raise auto_progress.AutoProgressError("content changed after validation", "content_changed")
+        deterministic_paths = {manifest["run_record_path"]}
+        allowed_target_paths = target_paths | deterministic_paths
+        with_record = _verify_delivery_content(
+            state, workspace, allowed_target_paths, deterministic_paths
+        )
         _checkpoint(state, "render_run_record", {"path": manifest["run_record_path"], "content_hash": run_record["content_hash"]})
         state["delivery_facts"] = facts
         store.save(state)
@@ -1649,19 +1827,29 @@ def finish_run(
                 state["gh_program"],
                 state["branch"],
                 state["task_type"],
-                sorted(set(with_record["changed_paths"]) | set(_status_transition_paths(state, workspace))),
+                sorted(allowed_target_paths),
             )
 
         revisions: dict[str, str] = {}
+        status_paths: set[str] = set()
         for index, item in enumerate(manifest["improvements"]):
             if _identity(workspace) != state["git_identity"]:
                 raise auto_progress.AutoProgressError(
                     "Git identity changed after preparation", "identity_mismatch"
                 )
-            paths = list(item["expected_paths"])
+            item_status_paths = _transition_improvement_implemented(
+                state, workspace, item
+            )
+            status_paths.update(item_status_paths)
+            deterministic_paths.update(item_status_paths)
+            allowed_target_paths.update(item_status_paths)
+            _verify_delivery_content(
+                state, workspace, allowed_target_paths, deterministic_paths
+            )
+            paths = list(item["expected_paths"]) + item_status_paths
             if index == 0:
                 paths.append(manifest["run_record_path"])
-            _git(workspace, "add", "--", *paths)
+            _git(workspace, "add", "-A", "--", *paths)
             message = f"AutoProgress: {item['id']} ({run_id})"
             committed = _git(workspace, "commit", "-m", message, check=False)
             if committed.returncode != 0:
@@ -1674,14 +1862,19 @@ def finish_run(
                 {"revision": revisions[item["id"]], "improvement_id": item["id"]},
             )
             store.save(state)
+        _verify_delivery_content(
+            state, workspace, allowed_target_paths, deterministic_paths
+        )
         revision = _git(workspace, "rev-parse", "HEAD").stdout.strip()
         state["change_handle"] = revision
         state["item_revisions"] = revisions
         _checkpoint(state, "record_change", {"revision": revision, "item_revisions": revisions})
+        _append_material_events(state, store, revision, None)
+        _checkpoint(state, "append_commit_ledger", {"recorded": True})
         facts["revision"] = revision
         facts["work_branch"] = state["branch"]
         facts["improvements"] = {
-            item["id"]: {"result": item["result"], "revision": revisions[item["id"]]}
+            item["id"]: {"result": "implemented", "revision": revisions[item["id"]]}
             for item in manifest["improvements"]
         }
         template = (
@@ -1716,7 +1909,7 @@ def finish_run(
                 state["gh_program"],
                 state["branch"],
                 state["task_type"],
-                sorted(set(with_record["changed_paths"]) | set(_status_transition_paths(state, workspace))),
+                sorted(allowed_target_paths),
             )
         review = None if state["skip_github"] else _open_review(workspace, state["gh_program"], state["branch"])
         if review is None and state["skip_github"]:
@@ -1745,35 +1938,6 @@ def finish_run(
         _checkpoint(state, "create_review", {"number": review.get("number"), "url": review.get("url"), "content_hash": review_doc["content_hash"]})
         store.save(state)
 
-        status_revision = _mark_improvements_implemented(state, workspace, store)
-        if status_revision:
-            revision = status_revision
-            facts["revision"] = revision
-            facts["improvements"] = {
-                item["id"]: {
-                    "result": "implemented",
-                    "revision": revisions[item["id"]],
-                }
-                for item in manifest["improvements"]
-            }
-            review_doc = render_review.render_document(template, manifest, facts)
-            state["review_document"] = review_doc
-            if not state["skip_github"]:
-                body_file = store.run_dir(project_id, run_id) / "review-body.md"
-                body_file.write_text(review_doc["body"], encoding="utf-8", newline="\n")
-                edited = _run(
-                    [state["gh_program"], "pr", "edit", str(review["number"]), "--body-file", str(body_file)],
-                    cwd=workspace,
-                    check=False,
-                )
-                if edited.returncode != 0:
-                    return stage_result(
-                        "finish-run", "recovery_required", "update_review_failed",
-                        "Status was published but the review body could not be updated",
-                        facts={"revision": revision, "review": review},
-                        checkpoint="mark_implemented", recovery="recover-run",
-                    )
-            store.save(state)
         if unity.get("verified") and not state["skip_github"] and review.get("isDraft"):
             ready = _run(
                 [state["gh_program"], "pr", "ready", str(review["number"])],
@@ -1813,7 +1977,9 @@ def finish_run(
         _checkpoint(state, "create_review", {"number": review.get("number"), "url": review.get("url"), "content_hash": review_doc["content_hash"]})
         store.save(state)
 
-        _append_material_events(state, store, revision, review)
+        _append_material_events(
+            state, store, revision, review, include_commit_events=False
+        )
         _checkpoint(state, "append_ledger", {"recorded": True})
         store.save(state)
 
@@ -1850,17 +2016,24 @@ def finish_run(
 
 def restore_workspace(state: dict[str, Any], store: StateStore) -> bool:
     repo = Path(state["repo_path"])
-    workspace = Path(state["workspace_path"])
-    if state["workspace_mode"] == "worktree":
-        if not workspace.exists():
-            return False
-        status = inspect_workspace(workspace, state["config"]["workspace"]["additional_ignore_patterns"])
-        if status["blocking"] or status["operations"]:
-            return False
-        parked = _git(workspace, "switch", "--detach", state["base_revision"], check=False)
-        return parked.returncode == 0
     original = state["original"]
-    return _restore_original(repo, original.get("branch"), original["head"])
+    if not _restore_original(repo, original.get("branch"), original["head"]):
+        return False
+    bypass = state.get("bypass_changes", {})
+    if bypass.get("paths"):
+        restored_snapshot = _index_snapshot(
+            repo,
+            original["head"],
+            state["config"]["workspace"]["additional_ignore_patterns"],
+        )
+        if (
+            restored_snapshot["changed_paths"] != bypass.get("paths")
+            or restored_snapshot["fingerprint"] != bypass.get("fingerprint")
+        ):
+            return False
+        if _git(repo, "diff", "--cached", "--quiet", check=False).returncode != 0:
+            return False
+    return True
 
 
 def recover_run(project_id: str, run_id: str, state_root: Path) -> dict[str, Any]:
@@ -1894,6 +2067,8 @@ def recover_run(project_id: str, run_id: str, state_root: Path) -> dict[str, Any
                     "record_change",
                     {"revision": revision, "item_revisions": reconciled, "reconciled": True},
                 )
+                _append_material_events(state, store, revision, None)
+                _checkpoint(state, "append_commit_ledger", {"recorded": True, "reconciled": True})
                 store.save(state)
                 checkpoints = state["checkpoints"]
             else:
@@ -1962,20 +2137,13 @@ def recover_run(project_id: str, run_id: str, state_root: Path) -> dict[str, Any
             _checkpoint(state, "create_review", {"number": review.get("number"), "url": review.get("url")})
             store.save(state)
 
-        if (
-            state["task_type"] == "implement-batch"
-            and "create_review" in state.get("checkpoints", {})
-            and "mark_implemented" not in state.get("checkpoints", {})
-        ):
-            status_revision = _mark_improvements_implemented(state, workspace, store)
-            if status_revision:
-                revision = status_revision
-
         if "append_ledger" not in state.get("checkpoints", {}):
             review = state.get("review_handle")
             if not isinstance(review, dict):
                 review = {"number": None, "url": None, "isDraft": True, "skipped": True}
-            _append_material_events(state, store, revision, review)
+            _append_material_events(
+                state, store, revision, review, include_commit_events=False
+            )
             _checkpoint(state, "append_ledger", {"recorded": True, "reconciled": True})
             store.save(state)
 

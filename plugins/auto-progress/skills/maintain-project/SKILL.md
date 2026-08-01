@@ -37,12 +37,14 @@ Before implementing code, load the repository-guidance cache paths returned by `
 - Keep each ordinary item inside its item budget and the whole batch inside its aggregate budget.
 - Implement the selected items without staging or committing. Keep expected path ownership disjoint and describe it in the delivery manifest.
 - On a pre-commit item failure, precisely undo only that item's uncommitted edits. On a post-commit failure before push, repair it or revert only that same-run item commit. Never reset or rewrite history.
-- Submit the semantic delivery manifest to `finish-run`. It computes the actual diff and budget, validates, commits and pushes the implementation, opens the Draft review, then creates one batch status commit that renames successfully delivered documents from `--queued.md` to `--implemented.md`. It records material events and restores the workspace.
+- Submit the semantic delivery manifest to `finish-run`. It freezes and unstages path-disjoint human changes, excludes them from delivery, computes the target diff and budget, validates the batch, then deterministically puts each item's `--implemented` transition in that item's independent commit. It pushes the completed batch once, opens the Draft review, records material events, and restores the workspace with bypassed human content preserved as unstaged.
+- Treat target-path overlap, a changed bypass fingerprint, a moved original branch, or a new non-target change after `finish-run` starts as `attention`; never classify those conditions as harmless model output.
 - Conflicts always require human resolution. Never merge, rebase, force-push, stash, reset, clean, or auto-resolve.
 
 ## Deliver and restore
 
 - Let `finish-run` perform delivery. On stage status `attention`, preserve the reported state and use the reported recovery action; do not repeat commit, push, or review creation manually.
+- When delivery reports bypassed human paths, tell the user they were excluded from the PR and restored unstaged. Do not add, revert, or edit them.
 - Mark Ready only when the matching already-open Unity Editor was refreshed and its C# compilation passed. Otherwise prominently state **未经 Unity 编译测试**.
 - Include the rejection-register notice and never merge the PR.
 - Append ledger events for each item and material Git/PR transition, then restore the original branch and refresh Unity if it was open.

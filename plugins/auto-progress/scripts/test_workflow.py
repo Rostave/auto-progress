@@ -153,6 +153,21 @@ class GitWorkflowTests(unittest.TestCase):
         run_git(repo, "commit", "-m", "base")
         return repo
 
+    def write_improvement(self, repo: Path, improvement_id: str) -> Path:
+        path = (
+            repo
+            / "docs"
+            / "auto-progress"
+            / "improvements"
+            / f"{improvement_id}--queued.md"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"---\nid: {improvement_id}\nstate: queued\n---\n\n# Improvement\n",
+            encoding="utf-8",
+        )
+        return path
+
     def test_content_fingerprint_uses_temporary_index(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repo = self.make_repo(Path(directory))
@@ -344,7 +359,7 @@ class GitWorkflowTests(unittest.TestCase):
             state = workflow.StateStore(state_root).load(project_id, RUN_ID)
             self.assertTrue(state["terminal"])
             self.assertEqual("succeeded", state["terminal_result"])
-            self.assertIn("status_revision", state)
+            self.assertNotIn("status_revision", state)
             tree = run_git(repo, "ls-tree", "-r", "--name-only", f"origin/{branch}")
             self.assertIn(
                 "docs/auto-progress/improvements/IMP-2026.07.30-a1b2c3d4--implemented.md",
@@ -361,6 +376,69 @@ class GitWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(1, summary["implementation"]["implemented"])
 
+    def test_finish_excludes_staged_disjoint_human_change_and_restores_it_unstaged(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = self.make_repo(root)
+            template = (PLUGIN_ROOT / "assets" / "auto-progress.toml").read_text(encoding="utf-8")
+            text = template.replace(
+                'base_branch = "feature/your-base-branch"', 'base_branch = "main"', 1
+            )
+            text = text.replace('program = "dotnet"', 'program = "git"', 1)
+            text = text.replace(
+                'args = ["msbuild", "YourUnityProject.sln", "-nologo", "-verbosity:minimal"]',
+                'args = ["diff", "--check"]',
+                1,
+            )
+            start = text.index("[unity_mcp]")
+            text = text[:start] + '[unity_mcp]\nmode = "disabled"\n'
+            (repo / ".codex").mkdir()
+            (repo / ".codex" / "auto-progress.toml").write_text(text, encoding="utf-8")
+            improvement = self.write_improvement(repo, "IMP-2026.08.01-55555555")
+            run_git(repo, "add", ".codex/auto-progress.toml", str(improvement.relative_to(repo)))
+            run_git(repo, "commit", "-m", "configure")
+            remote = root / "origin.git"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
+            run_git(repo, "remote", "add", "origin", str(remote))
+            run_git(repo, "push", "-u", "origin", "main")
+            original = run_git(repo, "rev-parse", "HEAD")
+            state_root = root / "state"
+            prepared = workflow.prepare_run(
+                repo, RUN_ID, "implement-batch", "main", state_root,
+                skip_github=True, trigger_source="manual",
+            )
+            self.assertEqual("completed", prepared["status"], prepared)
+
+            (repo / "Assets" / "Delivered.cs").write_text("class Delivered {}\n", encoding="utf-8")
+            (repo / "Assets" / "Base.cs").write_text("class Base { int Human; }\n", encoding="utf-8")
+            run_git(repo, "add", "Assets/Base.cs")
+            manifest = root / "manifest.json"
+            manifest.write_text(json.dumps({
+                "improvements": [{
+                    "id": "IMP-2026.08.01-55555555",
+                    "summary": "Add a delivered type.",
+                    "acceptance": "The configured validation succeeds.",
+                    "design_tradeoffs": "Independent from the human edit.",
+                    "expected_paths": ["Assets/Delivered.cs"],
+                }],
+                "run_record_path": f"docs/auto-progress/runs/{RUN_ID}.md",
+            }), encoding="utf-8")
+            project_id = auto_progress.make_project_id(str(remote), "main")
+
+            result = workflow.finish_run(project_id, RUN_ID, manifest, state_root)
+
+            self.assertEqual("completed", result["status"], result)
+            self.assertEqual("main", run_git(repo, "branch", "--show-current"))
+            self.assertIn("Human", (repo / "Assets" / "Base.cs").read_text(encoding="utf-8"))
+            self.assertEqual("Assets/Base.cs", run_git(repo, "diff", "--name-only"))
+            self.assertEqual("", run_git(repo, "diff", "--cached", "--name-only"))
+            branch = workflow._branch_name(RUN_ID, "implement-batch")
+            self.assertEqual("class Base {}", run_git(repo, "show", f"origin/{branch}:Assets/Base.cs"))
+            self.assertEqual("1", run_git(repo, "rev-list", "--count", f"{original}..origin/{branch}"))
+            state = workflow.StateStore(state_root).load(project_id, RUN_ID)
+            self.assertEqual(["Assets/Base.cs"], state["bypass_changes"]["paths"])
+            self.assertEqual(["Assets/Base.cs"], state["bypass_changes"]["unstaged_paths"])
+
     def test_rename_delivery_stages_old_and_new_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -376,7 +454,8 @@ class GitWorkflowTests(unittest.TestCase):
             text = text[:start] + '[unity_mcp]\nmode = "disabled"\n'
             (repo / ".codex").mkdir()
             (repo / ".codex" / "auto-progress.toml").write_text(text, encoding="utf-8")
-            run_git(repo, "add", ".codex/auto-progress.toml")
+            improvement = self.write_improvement(repo, "IMP-2026.08.01-11111111")
+            run_git(repo, "add", ".codex/auto-progress.toml", str(improvement.relative_to(repo)))
             run_git(repo, "commit", "-m", "configure v3")
             remote = root / "origin.git"
             subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
@@ -410,7 +489,7 @@ class GitWorkflowTests(unittest.TestCase):
             self.assertNotIn("Assets/Base.cs", tree)
             self.assertFalse(run_git(repo, "status", "--porcelain"))
 
-    def test_discovery_finish_renders_and_parks_persistent_worktree(self) -> None:
+    def test_discovery_finish_uses_and_restores_primary_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             repo = self.make_repo(root)
@@ -456,8 +535,9 @@ class GitWorkflowTests(unittest.TestCase):
             result = workflow.finish_run(project_id, RUN_ID, manifest, state_root)
 
             self.assertEqual("completed", result["status"], result)
-            self.assertTrue(worktree.exists())
-            self.assertEqual("", run_git(worktree, "branch", "--show-current"))
+            self.assertEqual(repo.resolve(), worktree.resolve())
+            self.assertEqual("main", run_git(repo, "branch", "--show-current"))
+            self.assertFalse((state_root / "workspaces" / project_id / "discovery").exists())
             state = workflow.StateStore(state_root).load(project_id, RUN_ID)
             self.assertTrue(state["terminal"])
 
@@ -476,7 +556,15 @@ class GitWorkflowTests(unittest.TestCase):
             text = text[:start] + '[unity_mcp]\nmode = "disabled"\n'
             (repo / ".codex").mkdir()
             (repo / ".codex" / "auto-progress.toml").write_text(text, encoding="utf-8")
-            run_git(repo, "add", ".codex/auto-progress.toml")
+            first_doc = self.write_improvement(repo, "IMP-2026.08.01-33333333")
+            second_doc = self.write_improvement(repo, "IMP-2026.08.01-44444444")
+            run_git(
+                repo,
+                "add",
+                ".codex/auto-progress.toml",
+                str(first_doc.relative_to(repo)),
+                str(second_doc.relative_to(repo)),
+            )
             run_git(repo, "commit", "-m", "configure v3")
             remote = root / "origin.git"
             subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
@@ -555,6 +643,27 @@ class GitWorkflowTests(unittest.TestCase):
             self.assertIn("content_hash", state["review_document"])
             self.assertTrue(state["terminal"])
             self.assertEqual("main", run_git(repo, "branch", "--show-current"))
+            branch = workflow._branch_name(RUN_ID, "implement-batch")
+            self.assertEqual(
+                "2",
+                run_git(repo, "rev-list", "--count", f"main..origin/{branch}"),
+            )
+            for improvement_id, code_path in (
+                ("IMP-2026.08.01-33333333", "Assets/One.cs"),
+                ("IMP-2026.08.01-44444444", "Assets/Two.cs"),
+            ):
+                committed_paths = run_git(
+                    repo,
+                    "show",
+                    "--format=",
+                    "--name-only",
+                    state["item_revisions"][improvement_id],
+                ).splitlines()
+                self.assertIn(code_path, committed_paths)
+                self.assertIn(
+                    f"docs/auto-progress/improvements/{improvement_id}--implemented.md",
+                    committed_paths,
+                )
 
 
 if __name__ == "__main__":

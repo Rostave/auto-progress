@@ -73,7 +73,7 @@ Status is derived from ledger events, not inferred from GitHub's contribution gr
 - `task_types`: per-type result counts and average recorded duration.
 
 A day belongs to exactly one terminal run category in exported summaries; completion wins over failure or skip.
-`implemented` means AutoProgress successfully delivered the Draft implementation review; it does not mean a human merged it. Discovery candidates remain non-authoritative until their discovery PR is merged.
+`implemented` means final validation passed and the deterministic item commit exists; push, Draft review, merge, and release are separate facts. Discovery candidates remain non-authoritative until their discovery PR is merged.
 
 ## Ledger retention
 

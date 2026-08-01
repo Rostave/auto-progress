@@ -12,9 +12,9 @@ Use read-only GitHub queries to find an open/Draft discovery PR. Count target in
 
 Discovery is human-only and never claims the scheduled implementation allowance.
 
-## Worktree and slice
+## Workspace lease and slice
 
-Call `prepare-run` with the registered base branch, task type `discover-improvements`, and trigger source `manual`. It fetches `origin`, freezes and validates the base policy, and reuses the project-level persistent lightweight worktree. Treat its structured result as authoritative; do not reproduce the Git transition in model reasoning.
+Call `prepare-run` with the registered base branch, task type `discover-improvements`, and trigger source `manual`. It requires and exclusively leases the clean original Unity checkout, fetches `origin`, freezes and validates the base policy, and switches the discovery branch in that checkout. Treat its structured result as authoritative; do not reproduce the Git transition in model reasoning.
 
 Use branch:
 
@@ -22,7 +22,7 @@ Use branch:
 codex/auto-progress/run-yyyy.mm.dd-xxxxxxxx-discover-improvements
 ```
 
-Base it exactly on the fetched remote base SHA. Do not copy or initialize `Library`.
+Base it exactly on the fetched remote base SHA. Do not create a second worktree or copy tracked Assets or `Library`. Do not allow human or automatic edits during the discovery lease; discovery has no non-target-change bypass.
 
 Build the review slice in this order:
 

@@ -181,7 +181,7 @@ _Avoid_: 改进项 ID、commit ID
 _Avoid_: 点子文档、TODO 列表
 
 **改进发现会话（Improvement Discovery Session）**:
-由人工显式触发、独立于实现维护，使用审查切片发现、评估和去重自动候选项的过程；它不实现改进项、不占用自动实现额度，并复用项目级常驻发现 worktree。
+由人工显式触发、独立于实现维护，使用审查切片发现、评估和去重自动候选项的过程；它不实现改进项、不占用自动实现额度，并独占租用原始 Unity 项目目录。
 _Avoid_: 预发现任务、每日发现、实现维护
 
 **改进发现 PR（Improvement Discovery PR）**:
@@ -201,12 +201,12 @@ _Avoid_: 维护完成、运行许可、Token 配额
 _Avoid_: 提前运行、任务类型、调用者
 
 **改进项状态（Improvement State）**:
-写入改进项文件名和 frontmatter 的持久生命周期状态，仅包含 `queued`、`implemented` 和 `cancelled`；`implemented` 表示 AutoProgress 已成功交付 Draft 实现 PR，不表示已经合并。
+写入改进项文件名和 frontmatter 的持久生命周期状态，仅包含 `queued`、`implemented` 和 `cancelled`；`implemented` 表示改进已通过最终验证并形成独立实现 commit，不要求 push、PR 或合并成功。
 _Avoid_: 单次结果、PR 合并状态、运行状态
 
-**常驻发现 Worktree（Persistent Discovery Worktree）**:
-保存在仓库外状态目录、跨发现会话复用并在空闲时以 detached HEAD 停放的轻量工作树；不包含 Unity `Library`，不用于代码实现。
-_Avoid_: Unity 工作区、副本项目、临时 worktree
+**旁路人工改动（Bypassed Human Change）**:
+在实现交付入口开始时已存在、与全部目标路径不重叠并可安全带回原分支的人工工作区改动；它以路径和内容指纹冻结，排除在实现 commit 与 PR 之外。
+_Avoid_: 忽略文件、允许修改、自动清理
 
 **仓库规范文档（Repository Guidance Document）**:
 由项目配置逐项声明、约束改进代码实现与验证的仓库内说明文件；默认位置包括 `AGENTS.md`、`CLAUDE.md` 和 `.github/copilot-instructions.md`。

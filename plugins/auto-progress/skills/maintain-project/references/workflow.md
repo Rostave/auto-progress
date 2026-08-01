@@ -15,6 +15,7 @@ Pass `trigger_source=scheduled` for an approved automation and `trigger_source=m
 - The configured base branch is the only source and PR target.
 - Reuse the original Unity checkout and Library; do not create a second Unity project.
 - Record the original branch and HEAD and require a clean tree with no active Git operation.
+- If path-disjoint human edits appear after implementation but before `finish-run`, let the deterministic entry point freeze their paths and fingerprints, unstage them, prove restoration safety, and exclude them from delivery. Target overlap or any later change stops delivery.
 - Never merge, rebase, force-push, stash, reset, clean, rewrite history, or resolve conflicts.
 - Restore the original branch at the end. If restoration fails, preserve state and block later runs for human recovery.
 
@@ -45,14 +46,14 @@ Run configured structured C# validation directly, never through a shell expressi
 2. Any focused checks required by an item.
 3. Once for the final successful subset.
 
-Implement items sequentially. Every item gets an independent commit referencing both its `IMP-...` and the shared `RUN-...`.
+Implement items without staging or committing, then submit the final successful subset together for one batch validation. After validation, deterministic delivery creates one independent commit per item referencing both its `IMP-...` and the shared `RUN-...`.
 
 - Failure before commit: remove only the current item's uncommitted edits; leave it queued.
 - Failure after commit and before any push: try a bounded repair; otherwise `git revert` only that item's same-run commit.
-- Re-run final validation and deliver successful items together.
+- Run final validation once for the successful subset, create its item commits, then push the batch once.
 - If isolation, revert, or validation is unsafe, stop and preserve pending recovery.
 
-Keep unsuccessful items `queued` and record their reason only in the ledger. After the Draft review exists, one batch status commit renames every successful document to `--implemented.md`; `implemented` means AutoProgress successfully delivered the Draft review, not that a human merged it.
+Keep unsuccessful items `queued` and record their reason only in the ledger. Before each item commit, deterministic delivery renames that item's document to `--implemented.md` and includes the transition with its code and tests. `implemented` means final validation passed and the item commit exists; push, Draft review, merge, and release remain separate facts.
 
 ## Unity and PR
 

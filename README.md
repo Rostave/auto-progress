@@ -13,15 +13,15 @@ AutoProgress 是一个面向 Unity C# 项目的 Codex 插件。它帮助你发�
 - 在任务中断后继续已有分支、提交、推送或 PR 交付。
 - 复用已打开的 Unity Editor，通过 Unity MCP 刷新并检查编译结果。
 
-## 0.3.0 新功能
+## 0.3.1 新功能
 
-相比 0.2.0，0.3.0 引入以下面向使用者的变化：
+相比 0.2.0，0.3.1 引入以下面向使用者的变化：
 
 - **人工运行不占每日额度**：手动执行发现、实现或管理任务不限制次数；只有定时触发的实现任务占用每日额度。
 - **仓库规范感知**：可分别读取 `AGENTS.md`、`CLAUDE.md` 和 `.github/copilot-instructions.md`，仅在对应文档发生变化时刷新缓存。
 - **两级拒绝机制**：既可按具体 `IMP-ID` 记录拒绝，也可提前声明不希望再次出现的方案模式。
 - **新增拒绝入口**：使用 `$record-improvement-rejection` 为指定改进项创建拒绝记录 Draft PR。
-- **发现任务更轻量**：复用仓库外的常驻 worktree，不复制 Unity `Library`，结束后自动停放。
+- **共享 Unity 工作区**：发现和实现任务都租用原 Unity 项目目录，不再为发现任务完整检出第二份受跟踪 Assets。
 - **改进项状态更直观**：新文件使用 `--queued.md`、`--implemented.md` 或 `--cancelled.md` 后缀。
 - **配置升级到 schema v4**：新增仓库规范文档和预防性拒绝规则配置；旧配置需要显式迁移。
 - **标准化发布**：插件版本使用 SemVer，发布标签使用 `vMAJOR.MINOR.PATCH`。
@@ -54,7 +54,7 @@ codex plugin add auto-progress@auto-progress-local
 
 ```powershell
 git fetch --tags
-git checkout v0.3.0
+git checkout v0.3.1
 codex plugin add auto-progress@auto-progress-local
 ```
 
@@ -111,7 +111,7 @@ Codex 会处理解压、marketplace 配置和插件安装。安装完成后，�
 使用 $discover-improvements 检查 Assets/Scripts/Combat。
 ```
 
-发现任务只审查代码并创建候选文档 Draft PR，不修改产品代码、不运行 Unity，也不占定时实现的每日额度。候选 PR 经人工合并到基准分支后，改进项才进入权威队列。
+发现任务只审查代码并创建候选文档 Draft PR，不修改产品代码、不运行 Unity，也不占定时实现的每日额度。它需要独占租用干净的原 Unity 项目目录，期间人工不得同时修改工作区；候选 PR 经人工合并到基准分支后，改进项才进入权威队列。
 
 ### 2. 手动执行实现任务
 
@@ -167,13 +167,13 @@ docs/auto-progress/rejection-rules.md
 
 暂停不会中断已经开始的任务。恢复后不会自动补跑错过的维护日。
 
-## 从 0.2.0 升级到 0.3.0
+## 从 0.2.0 升级到 0.3.1
 
 先更新并重新安装插件，然后新建 Codex 任务：
 
 ```powershell
 git fetch --tags
-git checkout v0.3.0
+git checkout v0.3.1
 codex plugin add auto-progress@auto-progress-local
 ```
 
@@ -222,7 +222,7 @@ operation_timeout_minutes = 10
 ## 如何理解改进项状态
 
 - `--queued.md`：已进入权威队列，等待实现。
-- `--implemented.md`：AutoProgress 已成功交付实现 Draft PR，不代表 PR 已合并。
+- `--implemented.md`：该改进项已通过最终验证，并由确定性脚本创建了独立实现 commit；不要求 push、PR 或合并成功。
 - `--cancelled.md`：该改进项已取消。
 
 状态以仓库外的本地账本事件为准。运行中间状态同样保存在 Codex 状态目录，不会写入 Unity 项目的 `.git` 或工作树。
@@ -232,6 +232,7 @@ operation_timeout_minutes = 10
 - 只向配置的基准分支创建 PR。
 - 所有 PR 默认是 Draft，永不自动合并。
 - Git 冲突必须人工解决；自动任务不会执行 merge、rebase、force-push、stash、reset 或 clean。
+- 实现任务在 `finish-run` 开始前发现与目标路径完全不重叠的人工修改时，会冻结其内容指纹、取消其暂存并排除在 PR 外；恢复后保留为 unstaged。目标路径重叠或后续内容变化仍会停止交付。
 - 定时实现任务每天最多占用一次额度；人工任务不限次数，但仍受未完成运行、现有 PR 和工作区状态等门禁约束。
 - 没有合格工作时允许跳过，不创建空提交。
 - 一个受管项目路径只应对应一个 AutoProgress 配置和一个运行来源。
@@ -249,7 +250,7 @@ operation_timeout_minutes = 10
 
 ### `implemented` 是否表示已经上线？
 
-不是。它只表示实现 Draft PR 已成功交付。是否合并、何时发布仍由人工决定。
+不是。它只表示改进已通过最终验证并形成独立实现 commit。push、Draft PR、人工合并和正式发布是后续独立事实。
 
 ### 中断后是否应该重新运行命令？
 
