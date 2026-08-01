@@ -255,7 +255,7 @@ operation_timeout_minutes = 10
 
 可以再次调用 `$maintain-project`。AutoProgress 会优先核对检查点、已有提交、远端分支和 PR，再决定继续步骤；不要手工重写历史或 force-push。
 
-## 更多文档
+## 更多文档（使用 Grill-with-Docs 维护）
 
 - [完整运行策略](docs/auto-progress/operating-policy.md)
 - [领域术语与项目上下文](CONTEXT.md)
