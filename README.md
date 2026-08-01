@@ -1,149 +1,200 @@
 # AutoProgress
 
-AutoProgress 是一个面向 Unity C# 项目的 Codex 插件。它把“寻找改进项”和“实现改进项”组织成受控任务，为定时实现保留每日额度，同时允许人工不限次数发起任务，并始终保留人工审查与合并权。
+AutoProgress 是一个面向 Unity C# 项目的 Codex 插件。它帮助你发现值得做的代码改进、维护改进队列，并以可审查的 Draft Pull Request 交付实现结果。
 
-核心原则是“代码守门，模型推理”：可形式化的配置与环境校验、版本控制状态转换、重试、恢复和交付事实由可测试脚本处理；模型负责理解意图、设计和编写代码、审查改动，以及解释需要用户处理的问题。成功且无需人工行动的内部阶段保持静默。
+它不会自动合并 PR，也不会替你解决 Git 冲突。你始终拥有最终审查与合并权。
 
-## 主要能力
+## 适合什么场景
 
-- `$maintain-project`：执行一次实现维护批次、人工提前运行或未完成任务恢复。
-- `$discover-improvements`：审查代码并通过 Draft PR 提交候选改进项，不修改产品代码。
-- `$configure-auto-progress`：初始化、迁移、验证、暂停、恢复、查看或导出状态。
-- `$queue-directed-improvement`：录入少量人工指定的改进项，不自动执行。
-- `$record-improvement-rejection`：根据人工提供的 `IMP-ID` 和拒绝理由，创建或完善拒绝记录 Draft PR。
-- 使用确定性检查点恢复中断的任务，并核对本地提交、远端分支和 PR 状态。
-- 由代码直接生成运行记录和最终 PR 报告，事实字段不依赖模型拼接。
+- 定期检查 Unity C# 代码，补充可执行的改进候选。
+- 按优先级实现已确认的改进项，一次最多组成一个小批次。
+- 临时加入人工指定的改进任务。
+- 记录不希望再次提出的方案，形成项目级拒绝策略。
+- 在任务中断后继续已有分支、提交、推送或 PR 交付。
+- 复用已打开的 Unity Editor，通过 Unity MCP 刷新并检查编译结果。
 
-除定时 `$maintain-project` 外，其余入口只能由使用者显式调用。人工调用 `$maintain-project` 不占每日额度；只有定时触发的实现任务占用额度。
+## 0.3.0 新功能
 
-## 环境要求
+相比 0.2.0，0.3.0 引入以下面向使用者的变化：
 
-- 支持本地 marketplace 和插件的 Codex 环境。
-- Python 3.11 或更高版本。
-- Git，以及已完成身份和远端配置的受管仓库。
-- GitHub CLI（`gh`），并已登录可访问目标仓库的账号。
-- Unity C# 项目，以及可由命令行执行的真实构建验证步骤。
-- Unity MCP 为可选能力，不是普通工作区准入的必要条件。
+- **人工运行不占每日额度**：手动执行发现、实现或管理任务不限制次数；只有定时触发的实现任务占用每日额度。
+- **仓库规范感知**：可分别读取 `AGENTS.md`、`CLAUDE.md` 和 `.github/copilot-instructions.md`，仅在对应文档发生变化时刷新缓存。
+- **两级拒绝机制**：既可按具体 `IMP-ID` 记录拒绝，也可提前声明不希望再次出现的方案模式。
+- **新增拒绝入口**：使用 `$record-improvement-rejection` 为指定改进项创建拒绝记录 Draft PR。
+- **发现任务更轻量**：复用仓库外的常驻 worktree，不复制 Unity `Library`，结束后自动停放。
+- **改进项状态更直观**：新文件使用 `--queued.md`、`--implemented.md` 或 `--cancelled.md` 后缀。
+- **配置升级到 schema v4**：新增仓库规范文档和预防性拒绝规则配置；旧配置需要显式迁移。
+- **标准化发布**：插件版本使用 SemVer，发布标签使用 `vMAJOR.MINOR.PATCH`。
 
 ## 安装
 
-1. 克隆本仓库。
-2. 将仓库内的本地 marketplace 加入 Codex：
+### 环境要求
+
+- 支持本地 marketplace 的 Codex。
+- Python 3.11 或更高版本。
+- Git，并已在目标项目中配置身份和远端。
+- GitHub CLI（`gh`），并已登录可访问目标仓库的账号。
+- Unity C# 项目，以及一条可从命令行执行的真实构建命令。
+- Unity MCP 可选；不使用时仍可通过普通 C# 构建完成验证。
+
+### 从仓库安装
+
+克隆仓库后，将其中的 marketplace 加入 Codex：
 
 ```powershell
-codex plugin marketplace add "<path-to-auto-progress>/.agents/plugins"
-```
-
-3. 安装插件：
-
-```powershell
+git clone https://github.com/Rostave/auto-progress.git
+cd auto-progress
+codex plugin marketplace add "$PWD/.agents/plugins"
 codex plugin add auto-progress@auto-progress-local
 ```
 
-4. 新建一个 Codex 任务，使新安装的 skill 生效。
+安装或更新后，请新建一个 Codex 任务，使最新 skills 生效。
 
-更新本地克隆后，再次执行第 3 步即可刷新插件缓存版本。
+如需固定到正式版本，请先切换到对应标签，再安装插件：
 
-## 快速开始
+```powershell
+git fetch --tags
+git checkout v0.3.0
+codex plugin add auto-progress@auto-progress-local
+```
 
-在需要管理的 Unity 仓库中显式调用：
+### 从 Release ZIP 安装
+
+不想克隆完整仓库时，从 [GitHub Releases](https://github.com/Rostave/auto-progress/releases) 下载目标版本的 `auto-progress-<version>.zip`，将 ZIP 附加到 Codex 任务，然后发送以下 prompt。若当前界面不接受 ZIP 附件，直接把 ZIP 的本地绝对路径一起发给 Codex。
+
+```text
+请安装我附加的 AutoProgress Release ZIP：
+
+1. 检查 ZIP 内是否存在 auto-progress/.codex-plugin/plugin.json，并读取插件版本。
+2. 将插件解压到版本隔离的本地目录，不要修改当前项目仓库。
+3. 为这个目录创建并注册一个非默认的本地 marketplace；source.path 指向 ./plugins/auto-progress。
+4. 从该 marketplace 安装 auto-progress。若同版本已经安装，则安全地重新安装；不要删除其他版本。
+5. 完成后告诉我安装的插件版本和 marketplace 名称，并提醒我新建 Codex 任务使插件生效。
+```
+
+Codex 会处理解压、marketplace 配置和插件安装。安装完成后，请按提示新建任务。
+
+## 第一次配置
+
+在需要管理的 Unity 项目中对 Codex 说：
 
 ```text
 使用 $configure-auto-progress init 初始化当前 Unity 项目。
 ```
 
-项目策略保存在：
+配置保存在 `.codex/auto-progress.toml`。初始化后，请至少确认：
+
+- `project.base_branch`：工作来源和 PR 目标分支。
+- `project.timezone`：项目使用的 IANA 时区，例如 `Asia/Shanghai`。
+- `validation.steps`：项目真实可用的 C# 构建命令；不要保留模板中的 `YourUnityProject.sln`。
+- `paths.allowed` 与 `paths.excluded`：AutoProgress 可修改和禁止修改的范围。
+- `schedule`：定时实现任务的运行窗口。
+- `unity_mcp.mode`：选择 `disabled`、`optional` 或 `required`。
+
+推荐先验证配置和环境：
 
 ```text
-.codex/auto-progress.toml
+使用 $configure-auto-progress validate 验证当前配置和仓库环境。
 ```
 
-初始化后至少需要人工确认：
+## 日常使用
 
-- `project.base_branch`：PR 唯一允许使用的目标分支。
-- `project.timezone`：例如 `Asia/Shanghai`。
-- `validation.steps`：项目真实可用的 C# 构建命令。
-- `paths.allowed` 和 `paths.excluded`：自动修改范围。
-- Unity MCP 模式、端点和期望的项目根目录。
-
-模板中的 `YourUnityProject.sln` 只是示例，必须替换成真实项目入口。配置确认完成后，可以先寻找改进项：
+### 1. 发现改进项
 
 ```text
 使用 $discover-improvements 为当前项目补充改进池。
 ```
 
-也可以直接提前执行当天的实现任务：
+也可以限制审查范围：
 
 ```text
-使用 $maintain-project 提前执行今天的 AutoProgress 实现任务。
+使用 $discover-improvements 检查 Assets/Scripts/Combat。
 ```
 
-## 使用方式
+发现任务只审查代码并创建候选文档 Draft PR，不修改产品代码、不运行 Unity，也不占定时实现的每日额度。候选 PR 经人工合并到基准分支后，改进项才进入权威队列。
 
-### 寻找改进项
+### 2. 手动执行实现任务
 
-发现任务会从最新远端基准分支创建轻量 worktree。它不复制 Unity `Library`，不调用 Unity MCP，也不执行 C# 构建。候选项只通过 Draft PR 提交；人工合入基准分支后，它们才会进入权威改进池。
+```text
+使用 $maintain-project 现在执行一次 AutoProgress 实现任务。
+```
 
-默认限制包括：
+手动实现不占每日额度。AutoProgress 会按以下顺序选择工作：
 
-- 目标库存中 10 项普通自动 `queued` 改进。
-- 单次最多提出 10 项。
-- 初始审查 30 个 C# 文件，每轮最多扩展 15 个。
-- 单次最多审查 60 个文件、合计 12,000 行源码。
-- 总时长受 `project.max_run_minutes` 限制，默认 60 分钟。
-
-发现任务是人工入口，不占用定时实现的每日额度。它复用仓库外的常驻轻量 worktree，任务结束后以 detached HEAD 停放，不反复创建和删除目录。
-
-### 实现维护批次
-
-工作选择顺序为：
-
-1. 恢复已有实现分支，或处理实现 PR 的审查反馈。
-2. 修复远端基准分支已有的 C# 编译错误。
+1. 恢复未完成的实现或处理已有实现 PR 的审查反馈。
+2. 修复基准分支已有的 C# 编译错误。
 3. 执行最高优先级的人工指令改进项。
-4. 从权威改进池选择最多 3 个兼容的普通自动改进项。
-5. 没有合格工作时安全跳过。
+4. 选择最多 3 个相互兼容的普通改进项。
+5. 没有安全且有价值的工作时正常跳过。
 
-恢复、编译修复和人工指令项默认独占一次运行。普通改进项只有在模块、范围、验证路径和总预算兼容时才能组成批次。每项改进保留独立 ID、验收条件和 commit。
+每次交付都会创建 Draft PR；AutoProgress 不会自动合并。
 
-### 人工指令改进项
+### 3. 添加人工指定任务
 
 ```text
 使用 $queue-directed-improvement 创建人工指令改进项：
-<描述期望结果、验收条件、允许范围与必要豁免>。
+优化角色存档加载过程；验收条件是……；允许修改范围是……。
 ```
 
-人工指令项可豁免拒绝清单，但仍受 Git 安全、冲突人工处理、验证真实性和人工合并等硬规则约束。除拒绝清单外，只有明确写入该指令项的豁免才生效。
+请尽量提供期望结果、验收条件、允许或禁止路径、优先级，以及确实需要的规则豁免。该入口只创建任务，不会在同一次调用中实现、提交或创建实现 PR。
 
-### 暂停、恢复与状态
+### 4. 拒绝不合适的改进
+
+拒绝一个已有改进项：
 
 ```text
-使用 $configure-auto-progress pause 暂停每日自动任务。
-使用 $configure-auto-progress resume 恢复每日自动任务。
-使用 $configure-auto-progress status 查看当前状态。
+使用 $record-improvement-rejection 拒绝 IMP-2026.08.01-xxxxxxxx，
+理由是：该模块必须保持无反射实现。
 ```
 
-暂停不会中断已经开始的任务；当天尚未开始时，则取消当天任务。恢复后不会自动补偿错过的维护日。
+AutoProgress 会为该 `IMP-ID` 创建或补全拒绝记录，并通过单独的 Draft PR 交付。它不会仅因为候选 PR 被关闭或未合并就推断“已拒绝”。
 
-改进项文件名使用 `IMP-...--queued.md`、`IMP-...--implemented.md` 或 `IMP-...--cancelled.md`。`implemented` 表示 AutoProgress 已成功交付 Draft 实现 PR，不表示已经由人工合并。
-
-### 仓库规范与拒绝策略
-
-配置可逐项声明代码实现需要遵守的仓库规范文档，默认位置为根目录 `AGENTS.md`、`CLAUDE.md` 和 `.github/copilot-instructions.md`。AutoProgress 为每份文档单独保存 Git blob SHA 和仓库外缓存；只有某份文档发生变化时才重新读取该文档。
-
-具体改进项的拒绝记录保存在 `docs/auto-progress/rejections/<IMP-ID>.md`。调用方式：
+若要提前阻止一类方案，可编辑：
 
 ```text
-使用 $record-improvement-rejection 拒绝 IMP-2026.08.01-xxxxxxxx，理由是：<人工提供的理由>。
+docs/auto-progress/rejection-rules.md
 ```
 
-如果还没有对应改进项，可直接在 `docs/auto-progress/rejection-rules.md` 中添加 `REJ-<kebab-case>` 规则，描述不希望 AutoProgress 提出的方案模式、理由和范围。两类拒绝都会阻止实质相似的自动候选项；人工指令改进项仍按其显式豁免规则处理。
+每条规则使用唯一的 `REJ-<kebab-case>` ID，说明不希望提出的方案模式、原因和适用范围。人工指令任务仍可使用明确声明的豁免，但不能绕过安全、凭据、人工合并或冲突处理规则。
 
-## 配置
+### 5. 查看、暂停或恢复
 
-### Unity MCP
+```text
+使用 $configure-auto-progress status 查看 AutoProgress 状态。
+使用 $configure-auto-progress pause 暂停后续定时任务。
+使用 $configure-auto-progress resume 恢复后续定时任务。
+```
 
-实现任务复用原始 Unity 项目目录和现有 `Library`。配置 Unity MCP 后，AutoProgress 可以连接匹配项目根目录的 Unity Editor，在 checkout 后刷新并检查 C# 编译结果。
+暂停不会中断已经开始的任务。恢复后不会自动补跑错过的维护日。
+
+## 从 0.2.0 升级到 0.3.0
+
+先更新并重新安装插件，然后新建 Codex 任务：
+
+```powershell
+git fetch --tags
+git checkout v0.3.0
+codex plugin add auto-progress@auto-progress-local
+```
+
+进入原 Unity 项目后执行：
+
+```text
+使用 $configure-auto-progress migrate 迁移当前项目配置。
+```
+
+迁移会先展示完整差异，只有确认后才写入 `.codex/auto-progress.toml`。它不会自动提交配置或创建迁移 PR。
+
+schema v4 会新增：
+
+- `[[repository_guidance.documents]]`：分别记录仓库规范文档及其 Git blob SHA。
+- `paths.rejection_rules`：预防性拒绝规则文件路径。
+
+旧的 `IMP-ID.md` 文件无需批量改名；AutoProgress 在正常交付触及对应改进项时才迁移其状态后缀。
+
+## Unity MCP
+
+Unity MCP 用于连接已经打开且项目路径匹配的 Unity Editor。推荐从 `optional` 模式开始：
 
 ```toml
 [unity_mcp]
@@ -156,97 +207,55 @@ connect_timeout_seconds = 5
 operation_timeout_minutes = 10
 ```
 
-仅允许 `127.0.0.1`、`localhost` 或 `::1` 端点，不允许 `0.0.0.0`、局域网或公网地址，也不在项目配置中保存认证信息。`adapter` 指定受信任的 Unity MCP 工具契约；脚本通过 initialize 和 `tools/list` 验证服务能力。
+- `disabled`：不连接 Unity MCP，仅执行配置的 C# 验证。
+- `optional`：连接失败时退回 C# 验证，并保持 PR 为 Draft。
+- `required`：无法连接匹配的 Editor 或无法完成验证时阻止交付。
 
-`optional` 模式下，即使 Editor 已打开但 MCP 不存在或连接失败，也会退回结构化 C# 验证并保持 Draft，不影响普通工作区准入。此时无法确认未保存的 Scene/Asset 以及 Play、Build、Import、Compile 或 Refresh 状态，这些项目会在运行记录和 PR 中标为未验证。
+端点必须是 `127.0.0.1`、`localhost` 或 `::1`。配置中不要保存令牌、凭据或其他机器专属秘密。
 
-只有实际完成匹配 Editor 的刷新且 C# 编译通过时，PR 才能自动标记 Ready；否则必须保持 Draft 并显示：
+只有匹配的 Unity Editor 实际完成刷新且 C# 编译通过时，PR 才可自动标记 Ready；否则会保持 Draft 并注明：
 
 ```text
 未经 Unity 编译测试
 ```
 
-### 版本与迁移
+## 如何理解改进项状态
 
-当前发布版本是 `0.3.0+codex.20260801090948`。后续发布统一使用 SemVer 2.0 格式 `MAJOR.MINOR.PATCH+codex.YYYYMMDDHHMMSS`，其中 14 位 UTC 时间仅作为 Codex 本地插件缓存标识，不参与 SemVer 版本优先级比较。破坏兼容性的变更提升 MAJOR，向后兼容的新能力或需要兼容迁移的新配置提升 MINOR，兼容修复提升 PATCH。
+- `--queued.md`：已进入权威队列，等待实现。
+- `--implemented.md`：AutoProgress 已成功交付实现 Draft PR，不代表 PR 已合并。
+- `--cancelled.md`：该改进项已取消。
 
-插件发布版本和项目内 `schema_version` 相互独立。升级到 0.3.0 后，旧项目配置必须由人工显式调用：
+状态以仓库外的本地账本事件为准。运行中间状态同样保存在 Codex 状态目录，不会写入 Unity 项目的 `.git` 或工作树。
 
-```text
-使用 $configure-auto-progress migrate 迁移当前项目配置。
-```
+## 安全边界与限制
 
-迁移按版本逐段执行。v2 先迁移到 v3；v3 到 v4 的确定性预览命令是：
+- 只向配置的基准分支创建 PR。
+- 所有 PR 默认是 Draft，永不自动合并。
+- Git 冲突必须人工解决；自动任务不会执行 merge、rebase、force-push、stash、reset 或 clean。
+- 定时实现任务每天最多占用一次额度；人工任务不限次数，但仍受未完成运行、现有 PR 和工作区状态等门禁约束。
+- 没有合格工作时允许跳过，不创建空提交。
+- 一个受管项目路径只应对应一个 AutoProgress 配置和一个运行来源。
+- 不支持同一项目的多个 clone 同时运行 AutoProgress，也不提供跨实例锁。
 
-```powershell
-python <plugin-root>/scripts/auto_progress.py migrate-config-v4 --config .codex/auto-progress.toml --repo .
-```
+## 常见问题
 
-确认完整差异后，使用同一命令加 `--write` 写入，再运行 `validate-config`。v4 会新增预防性拒绝规则路径，并分别记录 `AGENTS.md`、`CLAUDE.md` 和 `.github/copilot-instructions.md` 当前提交的 Git blob SHA；缺失文档记录空值，之后运行会在文档出现或变化时自行刷新。
+### 为什么发现任务没有修改代码？
 
-旧的无状态后缀 `IMP-ID.md` 不要求批量改名：它仍按 frontmatter 兼容读取，新建改进项使用 `--queued`，成功交付实现 PR 时才随该次状态提交迁移为 `--implemented`。迁移只修改用户确认的配置或正常交付触及的改进项，不会自动 commit、创建迁移 PR 或频繁重命名其余文件。
+发现和实现是两个独立阶段。发现任务只提交候选文档；候选 PR 合并后，后续 `$maintain-project` 才能选择并实现它们。
 
-## 工作原理
+### 为什么实现 PR 一直是 Draft？
 
-一次运行由确定性准备、模型实现、确定性交付和故障恢复组成：
+这是默认安全策略。若 Unity MCP 没有完成匹配 Editor 的刷新与编译验证，PR 还会明确显示“未经 Unity 编译测试”。
 
-```mermaid
-flowchart LR
-    A["准备<br/>环境检查、基准同步、工作区切换、基线验证"] --> B["实现<br/>选择工作、编写代码、测试与审查"]
-    B --> C["交付<br/>最终验证、commit、push、Draft PR、恢复工作区"]
-    A -. "中断" .-> D["恢复<br/>读取检查点并核对外部状态"]
-    C -. "中断" .-> D
-    D --> B
-    D --> C
-```
+### `implemented` 是否表示已经上线？
 
-- 准备阶段检查配置和环境，从远端基准创建实现分支或复用常驻发现 worktree，并执行适用的基线验证。失败时恢复本阶段产生的可逆变化。
-- 实现阶段由模型理解意图、组合改进项、编写代码和测试，并审查 diff。
-- 交付阶段重新检查实际 diff、修改范围、预算和 Git identity，完成最终验证、commit、push、Draft PR 和工作区恢复。
-- 每个已完成阶段都保存检查点。中断后从最后一个可靠检查点继续；外部状态不明确时请求人工处理。
+不是。它只表示实现 Draft PR 已成功交付。是否合并、何时发布仍由人工决定。
 
-确定性脚本在中途失败时恢复该脚本执行前的状态；已经成功完成并形成检查点的前序脚本结果不会丢失。运行中间状态按项目 ID 和运行 ID 保存在 Codex 本地状态根目录，不写入受管项目工作树或 `.git`。
+### 中断后是否应该重新运行命令？
 
-最终验证后，系统保存覆盖模型改动的内容指纹。生成运行记录后，如果 commit 前代码内容发生变化，必须重新验证。指纹只覆盖与交付相关的文件，不扫描 Unity `Library` 等大型生成目录。
+可以再次调用 `$maintain-project`。AutoProgress 会优先核对检查点、已有提交、远端分支和 PR，再决定继续步骤；不要手工重写历史或 force-push。
 
-模型提供改进项 ID、逐项摘要、验收说明和设计取舍；代码计算实际路径、diff、预算、Git identity、验证结果、提交版本、远端和 PR 状态。最终 PR 标题、正文和仓库内运行记录均由代码根据受信任模板和实际事实直接生成。
-
-## 安全边界
-
-- 基准分支由人工配置，也是唯一允许的 PR 目标分支。
-- 所有 PR 默认创建为 Draft，永不自动合并。
-- Git 冲突只能由人工解决；自动任务不执行 merge、rebase、force-push、stash、reset 或 clean。
-- 每个维护日最多占用一次定时实现额度；人工任务不限次数，但仍受工作区、未完成运行和现有 PR 等门禁约束。
-- 没有安全且有价值的工作时允许跳过，不创建空 commit。
-- Unity 未实际刷新与编译验证时，PR 必须明确标注“未经 Unity 编译测试”。
-- 本地运行账本按月追加保存，默认永久保留，只能由人工确认清理。
-
-## 部署限制
-
-当前只支持一个受管项目文件路径对应一个 AutoProgress 配置和一个运行来源。系统不提供跨实例锁，也不协调以下部署：
-
-- 同一项目的多个 clone 同时配置 AutoProgress。
-- 同一路径存在多个 AutoProgress 配置、automation 或运行实例。
-- 多个受管项目配置共享同一个 Unity 工作目录。
-
-使用者必须自行保证这些情况不会发生，并在 AutoProgress 运行期间遵守原项目目录租约。检查点用于崩溃恢复，不构成并发锁，也不能保护不受支持的多实例部署。
-
-## 开发与验证
-
-运行脚本测试：
-
-```powershell
-python -m unittest discover -s plugins/auto-progress/scripts -p "test_*.py" -v
-```
-
-校验示例配置：
-
-```powershell
-python plugins/auto-progress/scripts/auto_progress.py validate-config `
-  --config plugins/auto-progress/assets/auto-progress.toml
-```
-
-## 深入阅读
+## 更多文档
 
 - [完整运行策略](docs/auto-progress/operating-policy.md)
 - [领域术语与项目上下文](CONTEXT.md)

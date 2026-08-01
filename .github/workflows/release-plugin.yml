@@ -4,12 +4,18 @@ on:
   push:
     tags:
       - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to validate and package (for example, v0.2.0)
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: auto-progress-plugin-release
   cancel-in-progress: false
 
 jobs:
@@ -18,10 +24,26 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Resolve release tag
+        id: release
+        shell: bash
+        env:
+          REQUESTED_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$REQUESTED_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tags must use vMAJOR.MINOR.PATCH; received: $REQUESTED_TAG" >&2
+            exit 1
+          fi
+
+          echo "tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
+
       - name: Check out the tagged source
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: ${{ steps.release.outputs.tag }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -34,11 +56,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          tag="${GITHUB_REF_NAME}"
-          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "Release tags must use vMAJOR.MINOR.PATCH; received: $tag" >&2
-            exit 1
-          fi
+          tag="${RELEASE_TAG}"
 
           plugin_version="$(
             python - <<'PY'
@@ -61,6 +79,8 @@ jobs:
 
           echo "plugin_version=$plugin_version" >> "$GITHUB_OUTPUT"
           echo "asset_name=auto-progress-${core_version}.zip" >> "$GITHUB_OUTPUT"
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
 
       - name: Run plugin tests
         run: python -m unittest discover -s plugins/auto-progress/scripts -p "test_*.py" -v
@@ -83,7 +103,7 @@ jobs:
             --format=zip \
             --prefix=auto-progress/ \
             --output="dist/$ASSET_NAME" \
-            "${GITHUB_SHA}:plugins/auto-progress"
+            "HEAD:plugins/auto-progress"
 
           (
             cd dist
@@ -97,7 +117,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.release.outputs.tag }}
           PLUGIN_VERSION: ${{ steps.version.outputs.plugin_version }}
           ASSET_NAME: ${{ steps.version.outputs.asset_name }}
         run: |
