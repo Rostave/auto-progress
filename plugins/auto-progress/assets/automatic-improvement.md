@@ -21,6 +21,8 @@ evidence_blob_shas: {}
 
 # Improvement
 
+<!-- Save as IMP-YYYY.MM.DD-xxxxxxxx--queued.md. -->
+
 ## Motivation
 
 Describe the concrete problem and user or maintainer value.
@@ -45,4 +47,3 @@ Describe the concrete problem and user or maintainer value.
 
 - Compatible modules or affinity:
 - Known conflicts:
-

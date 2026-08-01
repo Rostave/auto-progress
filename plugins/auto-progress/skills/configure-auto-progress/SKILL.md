@@ -10,9 +10,11 @@ This is a manual administration entry point. Read [references/configuration.md](
 ## Supported operations
 
 - Initialize `.codex/auto-progress.toml` from the plugin template.
-- Migrate older policies only when a human explicitly requests `migrate`. Version 1 first receives the documented v2 fields; version 2 then migrates to v3. Use `migrate-config-v3` to preview the complete deterministic diff, obtain confirmation, and only then rerun it with `--write`; leave the tracked change for human review and commit.
+- Initialize the configured rejection-record directory and copy the proactive rejection-rule asset when absent; never overwrite existing human policy.
+- Migrate older policies only when a human explicitly requests `migrate`. Preserve the existing staged migrations; use `migrate-config-v4 --repo <repository>` for v3-to-v4 so every configured guidance document receives its own current Git blob SHA, and add the rejection-rule path only after showing the diff.
 - Set the one base branch used both as the work source and pull-request target.
-- Configure structured C# validation, discovery limits, change budgets, paths, Unity MCP expectations, and retry cooldown.
+- Configure structured C# validation, discovery limits, change budgets, paths, Unity MCP expectations, retry cooldown, proactive rejection rules, and repository-guidance document locations.
+- At configuration time, resolve and record each configured guidance document's Git blob SHA separately. Missing documents use an empty SHA and may appear later.
 - Validate configuration and run a read-only repository preflight.
 - Explain status counters using their documented event semantics.
 - Pause or resume future maintenance days. A pause does not interrupt a run already in progress; if today's run has not started, it cancels today.
@@ -22,7 +24,7 @@ This is a manual administration entry point. Read [references/configuration.md](
 ## Guardrails
 
 - Never offer a separate pull-request target branch.
-- Never edit the rejection list automatically.
+- Never edit rejection records or proactive rejection rules from this entry point.
 - Never create a directed improvement from this entry point.
 - Preserve unknown configuration keys when editing.
 - Do not store tokens, credentials, absolute machine-specific paths, or raw build logs in tracked configuration.

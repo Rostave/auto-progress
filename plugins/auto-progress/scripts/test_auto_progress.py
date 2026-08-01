@@ -21,6 +21,15 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(
             "feature/your-base-branch", validated["project"]["base_branch"]
         )
+        self.assertEqual(4, validated["schema_version"])
+        self.assertEqual(
+            ["AGENTS.md", "CLAUDE.md", ".github/copilot-instructions.md"],
+            [item["path"] for item in validated["repository_guidance"]["documents"]],
+        )
+        self.assertEqual(
+            "docs/auto-progress/rejection-rules.md",
+            validated["paths"]["rejection_rules"],
+        )
 
     def test_shell_expression_is_rejected(self) -> None:
         config = auto_progress.load_config(PLUGIN_ROOT / "assets" / "auto-progress.toml")
@@ -35,6 +44,40 @@ class ConfigTests(unittest.TestCase):
             auto_progress.AutoProgressError, "configure-auto-progress migrate"
         ):
             auto_progress.validate_config(config)
+
+    def test_v3_migration_adds_v4_policy_and_individual_guidance_shas(self) -> None:
+        config = auto_progress.load_config(PLUGIN_ROOT / "assets" / "auto-progress.toml")
+        config["schema_version"] = 3
+        config.pop("repository_guidance")
+        config["paths"].pop("rejection_rules")
+        shas = ["1" * 40, "", "3" * 40]
+
+        with patch(
+            "auto_progress.git",
+            return_value=type("GitResult", (), {"stdout": "true\n"})(),
+        ), patch(
+            "auto_progress._repository_guidance_blob_sha", side_effect=shas
+        ) as blob_sha:
+            migrated = auto_progress.migrate_config_v4(config, repo=Path("repo"))
+
+        self.assertEqual(4, migrated["schema_version"])
+        self.assertEqual(
+            "docs/auto-progress/rejection-rules.md",
+            migrated["paths"]["rejection_rules"],
+        )
+        self.assertEqual(
+            shas,
+            [item["blob_sha"] for item in migrated["repository_guidance"]["documents"]],
+        )
+        self.assertEqual(
+            ["AGENTS.md", "CLAUDE.md", ".github/copilot-instructions.md"],
+            [call.args[1] for call in blob_sha.call_args_list],
+        )
+
+    def test_v4_migration_rejects_non_v3_source(self) -> None:
+        config = auto_progress.load_config(PLUGIN_ROOT / "assets" / "auto-progress.toml")
+        with self.assertRaisesRegex(auto_progress.AutoProgressError, "only schema_version 3"):
+            auto_progress.migrate_config_v4(config, repo=Path("repo"))
 
 
 class IdentityTests(unittest.TestCase):
@@ -103,7 +146,7 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual(1, summary["completed_days"])
             self.assertEqual(1, summary["pr_opened"])
             self.assertEqual(0, summary["allowance_days"])
-            self.assertEqual(0, summary["implementation"]["delivered"])
+            self.assertEqual(0, summary["implementation"]["implemented"])
             with self.assertRaises(auto_progress.AutoProgressError):
                 auto_progress.append_ledger(
                     self.event("EVT-2026.07.30-00000001", "run_failed"),
@@ -134,7 +177,8 @@ class LedgerTests(unittest.TestCase):
                     root,
                     "Asia/Shanghai",
                     "RUN-2026.07.30-a1b2c3d4",
-                    "discover-improvements",
+                    "implement-batch",
+                    "scheduled",
                     now,
                 )
                 retry = auto_progress.claim_daily_allowance(
@@ -142,7 +186,8 @@ class LedgerTests(unittest.TestCase):
                     root,
                     "Asia/Shanghai",
                     "RUN-2026.07.30-a1b2c3d4",
-                    "discover-improvements",
+                    "implement-batch",
+                    "scheduled",
                     now,
                 )
                 self.assertTrue(first["claimed"])
@@ -156,6 +201,7 @@ class LedgerTests(unittest.TestCase):
                         "Asia/Shanghai",
                         "RUN-2026.07.30-deadbeef",
                         "implement-batch",
+                        "scheduled",
                         now,
                     )
 
@@ -166,10 +212,24 @@ class LedgerTests(unittest.TestCase):
             )
             self.assertEqual(1, summary["allowance_days"])
             self.assertEqual(
-                {"discover-improvements": 1},
+                {"implement-batch": 1},
                 summary["allowance_days_by_task_type"],
             )
-            self.assertEqual(1, summary["discovery"]["sessions"])
+
+    def test_manual_implementation_and_discovery_are_allowance_exempt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for task_type in ("implement-batch", "discover-improvements"):
+                result = auto_progress.claim_daily_allowance(
+                    "example-unity-project-test",
+                    root,
+                    "Asia/Shanghai",
+                    "RUN-2026.07.30-a1b2c3d4",
+                    task_type,
+                    "manual",
+                )
+                self.assertTrue(result["exempt"])
+            self.assertEqual([], list(root.glob("*.jsonl")))
 
     def test_discovery_commit_does_not_complete_implementation_day(self) -> None:
         events = [
@@ -195,6 +255,8 @@ class LedgerTests(unittest.TestCase):
         summary = auto_progress.summarize_events(events)
         self.assertEqual(0, summary["completed_days"])
         self.assertEqual(0, summary["pushed_days"])
+        self.assertEqual(0, summary["allowance_days"])
+        self.assertEqual(1, summary["legacy_allowance_days"])
         self.assertEqual(1, summary["discovery"]["sessions"])
 
 

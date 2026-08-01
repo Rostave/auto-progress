@@ -11,7 +11,7 @@
 
 | Improvement | Result | Intent | Risk |
 | --- | --- | --- | --- |
-| `IMP-YYYY.MM.DD-xxxxxxxx` | delivered |  |  |
+| `IMP-YYYY.MM.DD-xxxxxxxx` | implemented |  |  |
 
 ## Scope and acceptance criteria
 
@@ -36,4 +36,4 @@ Revert this pull request's commit after human review.
 
 ---
 
-若不想后续出现类似方案，需要将方案配置进“拒绝文档”，并使用点子池 ID 指名。
+若不想后续出现类似方案，可按 `IMP-ID` 创建具体拒绝记录；尚无改进项时可在预防性拒绝规则文档中添加 `REJ-...` 规则。

@@ -126,6 +126,14 @@ def stage_result(
     retryable: bool = False,
     attempts: int = 1,
 ) -> dict[str, Any]:
+    legacy_status = status
+    if status == "recovery_required":
+        status = "attention"
+    elif status == "failed_restored":
+        status = "failed"
+        facts = {**(facts or {}), "workspace_restored": True}
+    elif status not in {"completed", "attention", "failed"}:
+        raise ValueError(f"unsupported stage status: {legacy_status}")
     bounded: dict[str, Any] = {}
     for key, value in (facts or {}).items():
         if isinstance(value, list) and len(value) > MAX_FACT_ITEMS:
@@ -225,6 +233,13 @@ class StateStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         return path
 
+    def guidance_cache_path(self, project_id: str, document_path: str) -> Path:
+        _validate_identifier(project_id, "project_id", PROJECT_ID_RE)
+        key = hashlib.sha256(document_path.encode("utf-8")).hexdigest()[:20]
+        path = self.root / "guidance" / project_id / f"{key}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
 
 def _run(
     args: list[str],
@@ -296,6 +311,77 @@ def _config_from_revision(repo: Path, revision: str) -> dict[str, Any]:
     except tomllib.TOMLDecodeError as exc:
         raise auto_progress.AutoProgressError("base snapshot configuration is invalid", "config_invalid") from exc
     return auto_progress.validate_config(config)
+
+
+def _refresh_repository_guidance(
+    workspace: Path,
+    config: dict[str, Any],
+    store: StateStore,
+    project_id: str,
+) -> dict[str, Any]:
+    """Refresh only changed guidance documents and cache each one separately."""
+    documents: list[dict[str, Any]] = []
+    digest_parts: list[str] = []
+    for configured in config.get("repository_guidance", {}).get("documents", []):
+        relative = str(configured["path"]).replace("\\", "/")
+        blob = _git(workspace, "rev-parse", f"HEAD:{relative}", check=False)
+        blob_sha = blob.stdout.strip() if blob.returncode == 0 else ""
+        cache_path = store.guidance_cache_path(project_id, relative)
+        cached: dict[str, Any] = {}
+        if cache_path.exists():
+            try:
+                value = json.loads(cache_path.read_text(encoding="utf-8"))
+                if isinstance(value, dict):
+                    cached = value
+            except (OSError, json.JSONDecodeError):
+                cached = {}
+        changed = cached.get("blob_sha") != blob_sha
+        if changed:
+            content = ""
+            present = bool(blob_sha)
+            if present:
+                document_path = (workspace / relative).resolve()
+                try:
+                    document_path.relative_to(workspace.resolve())
+                except ValueError as exc:
+                    raise auto_progress.AutoProgressError(
+                        "repository guidance path escapes the workspace",
+                        "repository_guidance_invalid",
+                    ) from exc
+                content = document_path.read_text(encoding="utf-8")
+            payload = {
+                "agent": configured["agent"],
+                "path": relative,
+                "blob_sha": blob_sha,
+                "present": present,
+                "content": content,
+                "content_digest": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            }
+            temporary = cache_path.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+            os.replace(temporary, cache_path)
+            cached = payload
+        digest_parts.append(f"{relative}\n{blob_sha}")
+        documents.append(
+            {
+                "agent": configured["agent"],
+                "path": relative,
+                "configured_blob_sha": configured.get("blob_sha", ""),
+                "blob_sha": blob_sha,
+                "present": bool(blob_sha),
+                "changed": changed,
+                "cache_path": str(cache_path),
+                "content_digest": cached.get("content_digest"),
+            }
+        )
+    return {
+        "digest": hashlib.sha256("\n\n".join(digest_parts).encode("utf-8")).hexdigest(),
+        "documents": documents,
+    }
 
 
 def _head(repo: Path) -> tuple[str | None, str]:
@@ -501,12 +587,22 @@ def prepare_run(
     *,
     gh_program: str = "gh",
     skip_github: bool = False,
-    claim_allowance: bool = True,
+    trigger_source: str,
 ) -> dict[str, Any]:
     """Fetch a frozen policy, route adapters, admit a change context, and validate baseline."""
     repo = repo.resolve()
     if not auto_progress.RUN_ID_PATTERN.fullmatch(run_id):
         return stage_result("prepare-run", "failed_restored", "invalid_run_id", "Run ID is invalid")
+    if trigger_source not in {"manual", "scheduled"}:
+        return stage_result(
+            "prepare-run", "failed_restored", "invalid_trigger_source",
+            "Trigger source must be manual or scheduled",
+        )
+    if task_type != "implement-batch" and trigger_source == "scheduled":
+        return stage_result(
+            "prepare-run", "failed_restored", "scheduled_task_not_allowed",
+            "Only scheduled implement-batch runs are supported",
+        )
     try:
         remote = auto_progress.repository_remote(repo)
         project_id = auto_progress.make_project_id(remote, base_branch)
@@ -561,6 +657,7 @@ def prepare_run(
             "project_id": project_id,
             "run_id": run_id,
             "task_type": task_type,
+            "trigger_source": trigger_source,
             "terminal": False,
             "current_stage": "fetch_base",
             "created_at": datetime.now().astimezone().isoformat(),
@@ -613,13 +710,14 @@ def prepare_run(
         if existing_branch.returncode == 0:
             raise auto_progress.AutoProgressError("Run branch already exists", "change_context_exists")
 
-        if claim_allowance:
+        if trigger_source == "scheduled" and task_type == "implement-batch":
             allowance = auto_progress.claim_daily_allowance(
                 project_id,
                 state_root.resolve() / "ledger",
                 config["project"]["timezone"],
                 run_id,
                 task_type,
+                trigger_source,
             )
             state["allowance"] = {key: value for key, value in allowance.items() if key != "ledger"}
             store.save(state)
@@ -628,10 +726,32 @@ def prepare_run(
         workspace = repo
         try:
             if task_type == "discover-improvements":
-                workspace = store.run_dir(project_id, run_id) / "workspace"
-                added = _git(repo, "worktree", "add", "-b", branch, str(workspace), base_revision, check=False)
-                if added.returncode != 0:
-                    raise auto_progress.AutoProgressError("Unable to create discovery worktree", "admit_workspace_failed")
+                workspace = store.root / "workspaces" / project_id / "discovery"
+                if workspace.exists():
+                    parked = inspect_workspace(workspace, patterns)
+                    if parked["blocking"] or parked["operations"]:
+                        raise auto_progress.AutoProgressError(
+                            "Persistent discovery worktree needs attention",
+                            "persistent_worktree_not_clean",
+                        )
+                    detached = _git(workspace, "switch", "--detach", base_revision, check=False)
+                    switched = (
+                        _git(workspace, "switch", "-c", branch, base_revision, check=False)
+                        if detached.returncode == 0 else detached
+                    )
+                    if detached.returncode != 0 or switched.returncode != 0:
+                        raise auto_progress.AutoProgressError(
+                            "Unable to reuse discovery worktree", "admit_workspace_failed"
+                        )
+                else:
+                    workspace.parent.mkdir(parents=True, exist_ok=True)
+                    added = _git(repo, "worktree", "add", "--detach", str(workspace), base_revision, check=False)
+                    switched = (
+                        _git(workspace, "switch", "-c", branch, base_revision, check=False)
+                        if added.returncode == 0 else added
+                    )
+                    if added.returncode != 0 or switched.returncode != 0:
+                        raise auto_progress.AutoProgressError("Unable to create discovery worktree", "admit_workspace_failed")
                 created = True
             else:
                 switched = _git(repo, "switch", "-c", branch, base_revision, check=False)
@@ -657,6 +777,14 @@ def prepare_run(
                 },
             )
             store.save(state)
+
+            if task_type == "implement-batch":
+                guidance = _refresh_repository_guidance(
+                    workspace, config, store, project_id
+                )
+                state["repository_guidance"] = guidance
+                _checkpoint(state, "repository_guidance", guidance)
+                store.save(state)
 
             baseline = (
                 {"passed": True, "skipped": True, "reason": "discovery_does_not_run_csharp_validation", "steps": []}
@@ -707,6 +835,7 @@ def prepare_run(
                     "branch": branch,
                     "ignored_untracked": admission["ignored_untracked"],
                     "review_host": review_facts,
+                    "repository_guidance": state.get("repository_guidance"),
                 },
                 checkpoint="baseline_validation",
             )
@@ -715,10 +844,10 @@ def prepare_run(
                 if task_type == "discover-improvements":
                     clean = inspect_workspace(workspace, patterns) if workspace.exists() else {"blocking": []}
                     if not clean["blocking"]:
-                        removed = _git(repo, "worktree", "remove", str(workspace), check=False)
-                        deleted = _git(repo, "branch", "-D", branch, check=False) if removed.returncode == 0 else removed
+                        parked = _git(workspace, "switch", "--detach", base_revision, check=False)
+                        deleted = _git(repo, "branch", "-D", branch, check=False) if parked.returncode == 0 else parked
                         exists = _git(repo, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}", check=False)
-                        created = not (removed.returncode == 0 and deleted.returncode == 0 and exists.returncode != 0)
+                        created = not (parked.returncode == 0 and deleted.returncode == 0 and exists.returncode != 0)
                 else:
                     if _restore_original(repo, original_branch, original_head):
                         tip = _git(repo, "rev-parse", branch, check=False).stdout.strip()
@@ -729,7 +858,7 @@ def prepare_run(
             if not created:
                 state["recovery_obligations"] = []
                 state["terminal"] = True
-                state["terminal_result"] = "failed_restored"
+                state["terminal_result"] = "failed"
                 store.save(state)
                 return stage_result(
                     "prepare-run",
@@ -752,7 +881,7 @@ def prepare_run(
         reason = exc.reason_code if isinstance(exc, auto_progress.AutoProgressError) else "prepare_run_failed"
         if "state" in locals() and "store" in locals() and not state.get("recovery_obligations"):
             state["terminal"] = True
-            state["terminal_result"] = "failed_restored"
+            state["terminal_result"] = "failed"
             try:
                 store.save(state)
             except OSError:
@@ -894,7 +1023,7 @@ def _validate_manifest(
                 "acceptance": item["acceptance"].strip(),
                 "design_tradeoffs": tradeoffs.strip(),
                 "expected_paths": [path.replace("\\", "/") for path in expected],
-                "result": "delivered",
+                "result": "succeeded",
             }
         )
     run_record = manifest.get("run_record_path")
@@ -922,6 +1051,8 @@ def _validate_manifest(
         config["paths"]["directed"].rstrip("/") + "/**",
         config["paths"]["rejections"].rstrip("/") + "/**",
     ]
+    if config["paths"].get("rejection_rules"):
+        document_roots.append(config["paths"]["rejection_rules"])
     out_of_scope = [
         path
         for path in actual
@@ -949,6 +1080,75 @@ def _validate_manifest(
         "ownership": owned,
         "budget_limits": limits,
     }
+
+
+def _validate_improvement_documents(
+    workspace: Path,
+    manifest: dict[str, Any],
+    task_type: str,
+    config: dict[str, Any],
+) -> None:
+    allowed_states = {"queued", "implemented", "cancelled"}
+    for item in manifest["improvements"]:
+        improvement_id = item["id"]
+        if task_type == "discover-improvements":
+            expected = (
+                Path(config["paths"]["ideas"])
+                / f"{improvement_id}--queued.md"
+            ).as_posix()
+            if item["expected_paths"] != [expected]:
+                raise auto_progress.AutoProgressError(
+                    f"discovery document must be {expected}",
+                    "improvement_filename_invalid",
+                )
+            candidates = [workspace / expected]
+        else:
+            candidates = []
+            for root_key in ("ideas", "directed"):
+                root = workspace / config["paths"][root_key]
+                candidates.extend(
+                    path
+                    for path in (
+                        root / f"{improvement_id}.md",
+                        root / f"{improvement_id}--queued.md",
+                        root / f"{improvement_id}--implemented.md",
+                        root / f"{improvement_id}--cancelled.md",
+                    )
+                    if path.exists()
+                )
+            if not candidates:
+                continue
+        if len(candidates) != 1:
+            raise auto_progress.AutoProgressError(
+                f"expected one improvement document for {improvement_id}",
+                "improvement_document_ambiguous",
+            )
+        document = candidates[0]
+        text = document.read_text(encoding="utf-8")
+        state_match = re.search(r"(?m)^state:\s*([a-z-]+)\s*$", text)
+        id_match = re.search(r"(?m)^id:\s*(IMP-[^\s]+)\s*$", text)
+        if not state_match or state_match.group(1) not in allowed_states:
+            raise auto_progress.AutoProgressError(
+                f"{document.relative_to(workspace)} has an invalid state",
+                "improvement_state_invalid",
+            )
+        if not id_match or id_match.group(1) != improvement_id:
+            raise auto_progress.AutoProgressError(
+                f"{document.relative_to(workspace)} has a mismatched improvement ID",
+                "improvement_id_mismatch",
+            )
+        state = state_match.group(1)
+        suffix = re.search(r"--([a-z-]+)\.md$", document.name)
+        if suffix and suffix.group(1) != state:
+            raise auto_progress.AutoProgressError(
+                f"{document.relative_to(workspace)} filename and frontmatter state differ",
+                "improvement_state_mismatch",
+            )
+        if state != "queued":
+            raise auto_progress.AutoProgressError(
+                f"{document.relative_to(workspace)} is not queued",
+                "improvement_state_invalid",
+            )
 
 
 def _identity(repo: Path) -> dict[str, str]:
@@ -1042,6 +1242,7 @@ def _append_material_events(state: dict[str, Any], store: StateStore, revision: 
         "timestamp": local.isoformat(),
         "run_id": state["run_id"],
         "task_type": state["task_type"],
+        "trigger_source": state.get("trigger_source", "legacy"),
     }
     run_date = str(state["run_id"])[4:14]
 
@@ -1080,6 +1281,17 @@ def _append_material_events(state: dict[str, Any], store: StateStore, revision: 
             },
         ]
     )
+    if state["task_type"] == "implement-batch" and state.get("status_revision"):
+        events.extend(
+            {
+                **base,
+                "event_id": event_id("improvement_implemented", improvement_id),
+                "event_type": "improvement_implemented",
+                "improvement_id": improvement_id,
+                "revision": str(state["status_revision"])[:12],
+            }
+            for improvement_id in sorted(item_revisions)
+        )
     for event in events:
         auto_progress.append_ledger(event, state["project_id"], ledger_root, timezone)
 
@@ -1199,7 +1411,7 @@ def _resume_record_change(
     facts["revision"] = final_revision
     facts["work_branch"] = state["branch"]
     facts["improvements"] = {
-        item["id"]: {"result": "delivered", "revision": revisions[item["id"]]}
+        item["id"]: {"result": "succeeded", "revision": revisions[item["id"]]}
         for item in items
     }
     template = (
@@ -1210,6 +1422,113 @@ def _resume_record_change(
     state["review_document"] = render_review.render_document(template, manifest, facts)
     store.save(state)
     return revisions
+
+
+def _mark_improvements_implemented(
+    state: dict[str, Any], workspace: Path, store: StateStore
+) -> str | None:
+    """Rename all delivered improvement documents in one post-review commit."""
+    if state["task_type"] != "implement-batch":
+        return None
+    manifest = state.get("delivery_manifest", {})
+    changed_paths: list[str] = []
+    for item in manifest.get("improvements", []):
+        improvement_id = item["id"]
+        matches: list[Path] = []
+        for root_key in ("ideas", "directed"):
+            root = workspace / state["config"]["paths"][root_key]
+            for name in (f"{improvement_id}.md", f"{improvement_id}--queued.md"):
+                candidate = root / name
+                if candidate.exists():
+                    matches.append(candidate)
+        implemented_matches = [
+            workspace / state["config"]["paths"][root_key] / f"{improvement_id}--implemented.md"
+            for root_key in ("ideas", "directed")
+        ]
+        if not matches and any(path.exists() for path in implemented_matches):
+            continue
+        if not matches:
+            continue
+        if len(matches) != 1:
+            raise auto_progress.AutoProgressError(
+                f"multiple improvement documents found for {improvement_id}",
+                "improvement_document_ambiguous",
+            )
+        source = matches[0]
+        text = source.read_text(encoding="utf-8")
+        if not re.search(r"(?m)^state:\s*queued\s*$", text):
+            raise auto_progress.AutoProgressError(
+                f"{source.relative_to(workspace)} is not queued",
+                "improvement_state_invalid",
+            )
+        updated = re.sub(
+            r"(?m)^state:\s*queued\s*$", "state: implemented", text, count=1
+        )
+        destination = source.with_name(f"{improvement_id}--implemented.md")
+        source.write_text(updated, encoding="utf-8", newline="\n")
+        source.rename(destination)
+        changed_paths.extend(
+            [
+                source.relative_to(workspace).as_posix(),
+                destination.relative_to(workspace).as_posix(),
+            ]
+        )
+    if not changed_paths:
+        return None
+    if _identity(workspace) != state["git_identity"]:
+        raise auto_progress.AutoProgressError(
+            "Git identity changed before status transition", "identity_mismatch"
+        )
+    _git(workspace, "add", "-A", "--", *sorted(set(changed_paths)))
+    count = len(manifest.get("improvements", []))
+    committed = _git(
+        workspace,
+        "commit",
+        "-m",
+        f"AutoProgress: mark {count} improvements implemented ({state['run_id']})",
+        check=False,
+    )
+    if committed.returncode != 0:
+        raise auto_progress.AutoProgressError(
+            "unable to commit improvement status transition", "status_transition_failed"
+        )
+    revision = _git(workspace, "rev-parse", "HEAD").stdout.strip()
+    pushed = _git(
+        workspace, "push", "origin", f"HEAD:refs/heads/{state['branch']}", check=False
+    )
+    if pushed.returncode != 0:
+        raise auto_progress.AutoProgressError(
+            "unable to publish improvement status transition", "status_transition_publish_failed"
+        )
+    state["status_revision"] = revision
+    state["change_handle"] = revision
+    _checkpoint(
+        state,
+        "mark_implemented",
+        {"revision": revision, "paths": sorted(set(changed_paths))},
+    )
+    store.save(state)
+    return revision
+
+
+def _status_transition_paths(state: dict[str, Any], workspace: Path) -> list[str]:
+    if state["task_type"] != "implement-batch":
+        return []
+    paths: set[str] = set()
+    for item in state.get("delivery_manifest", {}).get("improvements", []):
+        improvement_id = item["id"]
+        for root_key in ("ideas", "directed"):
+            root = workspace / state["config"]["paths"][root_key]
+            for name in (f"{improvement_id}.md", f"{improvement_id}--queued.md"):
+                candidate = root / name
+                if candidate.exists():
+                    paths.add(candidate.relative_to(workspace).as_posix())
+                    paths.add(
+                        candidate.with_name(f"{improvement_id}--implemented.md")
+                        .relative_to(workspace)
+                        .as_posix()
+                    )
+    return sorted(paths)
 
 
 def finish_run(
@@ -1245,6 +1564,9 @@ def finish_run(
         if not snapshot["entries"]:
             raise auto_progress.AutoProgressError("there are no changes to deliver", "empty_change")
         manifest = _validate_manifest(manifest_raw, state["task_type"], snapshot, config)
+        _validate_improvement_documents(
+            workspace, manifest, state["task_type"], config
+        )
         state["delivery_manifest"] = manifest
         store.save(state)
         staged = _git(workspace, "diff", "--cached", "--quiet", check=False)
@@ -1274,7 +1596,6 @@ def finish_run(
 
         unity = (
             {
-                "status": "unity_unverified",
                 "reason_code": "discovery_does_not_run_unity",
                 "verified": False,
                 "content_fingerprint": validated["fingerprint"],
@@ -1328,7 +1649,7 @@ def finish_run(
                 state["gh_program"],
                 state["branch"],
                 state["task_type"],
-                with_record["changed_paths"],
+                sorted(set(with_record["changed_paths"]) | set(_status_transition_paths(state, workspace))),
             )
 
         revisions: dict[str, str] = {}
@@ -1395,7 +1716,7 @@ def finish_run(
                 state["gh_program"],
                 state["branch"],
                 state["task_type"],
-                with_record["changed_paths"],
+                sorted(set(with_record["changed_paths"]) | set(_status_transition_paths(state, workspace))),
             )
         review = None if state["skip_github"] else _open_review(workspace, state["gh_program"], state["branch"])
         if review is None and state["skip_github"]:
@@ -1421,6 +1742,38 @@ def finish_run(
             raise auto_progress.AutoProgressError("review target branch is incorrect", "review_target_mismatch")
         state["review_handle"] = review
         state["review_document"] = review_doc
+        _checkpoint(state, "create_review", {"number": review.get("number"), "url": review.get("url"), "content_hash": review_doc["content_hash"]})
+        store.save(state)
+
+        status_revision = _mark_improvements_implemented(state, workspace, store)
+        if status_revision:
+            revision = status_revision
+            facts["revision"] = revision
+            facts["improvements"] = {
+                item["id"]: {
+                    "result": "implemented",
+                    "revision": revisions[item["id"]],
+                }
+                for item in manifest["improvements"]
+            }
+            review_doc = render_review.render_document(template, manifest, facts)
+            state["review_document"] = review_doc
+            if not state["skip_github"]:
+                body_file = store.run_dir(project_id, run_id) / "review-body.md"
+                body_file.write_text(review_doc["body"], encoding="utf-8", newline="\n")
+                edited = _run(
+                    [state["gh_program"], "pr", "edit", str(review["number"]), "--body-file", str(body_file)],
+                    cwd=workspace,
+                    check=False,
+                )
+                if edited.returncode != 0:
+                    return stage_result(
+                        "finish-run", "recovery_required", "update_review_failed",
+                        "Status was published but the review body could not be updated",
+                        facts={"revision": revision, "review": review},
+                        checkpoint="mark_implemented", recovery="recover-run",
+                    )
+            store.save(state)
         if unity.get("verified") and not state["skip_github"] and review.get("isDraft"):
             ready = _run(
                 [state["gh_program"], "pr", "ready", str(review["number"])],
@@ -1473,12 +1826,12 @@ def finish_run(
                 facts={"revision": revision, "review": review}, checkpoint="create_review", recovery="recover-run"
             )
         state["terminal"] = True
-        state["terminal_result"] = "delivered"
+        state["terminal_result"] = "succeeded"
         state["recovery_obligations"] = []
         _checkpoint(state, "completed", {"revision": revision, "review": review})
         store.save(state)
         return stage_result(
-            "finish-run", "completed", "delivered", "Change was committed, published, and submitted for review",
+            "finish-run", "completed", "succeeded", "Change was committed, published, and submitted for review",
             facts={"project_id": project_id, "run_id": run_id, "revision": revision, "review": review, "content_hash": review_doc["content_hash"], "unity": unity},
             checkpoint="completed"
         )
@@ -1499,14 +1852,13 @@ def restore_workspace(state: dict[str, Any], store: StateStore) -> bool:
     repo = Path(state["repo_path"])
     workspace = Path(state["workspace_path"])
     if state["workspace_mode"] == "worktree":
-        if workspace.exists():
-            status = inspect_workspace(workspace, state["config"]["workspace"]["additional_ignore_patterns"])
-            if status["blocking"] or status["operations"]:
-                return False
-            removed = _git(repo, "worktree", "remove", str(workspace), check=False)
-            if removed.returncode != 0:
-                return False
-        return True
+        if not workspace.exists():
+            return False
+        status = inspect_workspace(workspace, state["config"]["workspace"]["additional_ignore_patterns"])
+        if status["blocking"] or status["operations"]:
+            return False
+        parked = _git(workspace, "switch", "--detach", state["base_revision"], check=False)
+        return parked.returncode == 0
     original = state["original"]
     return _restore_original(repo, original.get("branch"), original["head"])
 
@@ -1562,7 +1914,7 @@ def recover_run(project_id: str, run_id: str, state_root: Path) -> dict[str, Any
                     )
                 if restore_workspace(state, store):
                     state["terminal"] = True
-                    state["terminal_result"] = "failed_restored"
+                    state["terminal_result"] = "failed"
                     state["recovery_obligations"] = []
                     _checkpoint(state, "recovered_without_delivery", {})
                     store.save(state)
@@ -1610,6 +1962,15 @@ def recover_run(project_id: str, run_id: str, state_root: Path) -> dict[str, Any
             _checkpoint(state, "create_review", {"number": review.get("number"), "url": review.get("url")})
             store.save(state)
 
+        if (
+            state["task_type"] == "implement-batch"
+            and "create_review" in state.get("checkpoints", {})
+            and "mark_implemented" not in state.get("checkpoints", {})
+        ):
+            status_revision = _mark_improvements_implemented(state, workspace, store)
+            if status_revision:
+                revision = status_revision
+
         if "append_ledger" not in state.get("checkpoints", {}):
             review = state.get("review_handle")
             if not isinstance(review, dict):
@@ -1625,7 +1986,7 @@ def recover_run(project_id: str, run_id: str, state_root: Path) -> dict[str, Any
                 checkpoint=state.get("current_stage"), recovery="manual"
             )
         state["terminal"] = True
-        state["terminal_result"] = "recovered"
+        state["terminal_result"] = "succeeded"
         state["recovery_obligations"] = []
         _checkpoint(state, "recovered", {"revision": revision, "review": state.get("review_handle")})
         store.save(state)

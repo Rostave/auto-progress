@@ -181,7 +181,7 @@ _Avoid_: 改进项 ID、commit ID
 _Avoid_: 点子文档、TODO 列表
 
 **改进发现会话（Improvement Discovery Session）**:
-由人工显式触发、独立于实现维护，使用审查切片发现、评估和去重自动候选项的过程；它不实现改进项、不产生维护完成事件，但启动后会占用当天活动额度并取消尚未开始的维护运行。
+由人工显式触发、独立于实现维护，使用审查切片发现、评估和去重自动候选项的过程；它不实现改进项、不占用自动实现额度，并复用项目级常驻发现 worktree。
 _Avoid_: 预发现任务、每日发现、实现维护
 
 **改进发现 PR（Improvement Discovery PR）**:
@@ -193,8 +193,32 @@ _Avoid_: 点子 PR、维护 PR、自动入池
 _Avoid_: 拒绝期、永久排除、新点子
 
 **每日活动额度（Daily Activity Allowance）**:
-一个维护日内用于约束主要 AutoProgress 流程资源消耗的单次额度；任一 AutoProgress 任务类型开始核心工作后即占用，当天不得再启动其他任务类型。
+一个维护日内只允许一次定时 `implement-batch` 启动核心工作的额度；人工触发的实现、发现和管理任务均不读取或占用它。
 _Avoid_: 维护完成、运行许可、Token 配额
+
+**触发来源（Trigger Source）**:
+明确标识一次运行由人工直接调用还是由定时任务触发的必填属性；它决定实现运行是否竞争每日活动额度，但不改变其他安全门禁。
+_Avoid_: 提前运行、任务类型、调用者
+
+**改进项状态（Improvement State）**:
+写入改进项文件名和 frontmatter 的持久生命周期状态，仅包含 `queued`、`implemented` 和 `cancelled`；`implemented` 表示 AutoProgress 已成功交付 Draft 实现 PR，不表示已经合并。
+_Avoid_: 单次结果、PR 合并状态、运行状态
+
+**常驻发现 Worktree（Persistent Discovery Worktree）**:
+保存在仓库外状态目录、跨发现会话复用并在空闲时以 detached HEAD 停放的轻量工作树；不包含 Unity `Library`，不用于代码实现。
+_Avoid_: Unity 工作区、副本项目、临时 worktree
+
+**仓库规范文档（Repository Guidance Document）**:
+由项目配置逐项声明、约束改进代码实现与验证的仓库内说明文件；默认位置包括 `AGENTS.md`、`CLAUDE.md` 和 `.github/copilot-instructions.md`。
+_Avoid_: AutoProgress 策略、系统提示词、发现资料
+
+**仓库规范快照（Repository Guidance Snapshot）**:
+按单个规范文档 Git blob SHA 缓存在仓库外的内容快照；仅对应文档 SHA 变化时重新读取，多个文档不得合并为一个缓存实体。
+_Avoid_: 配置锁定、规则副本、运行日志
+
+**插件发布版本（Plugin Release Version）**:
+标识一个可安装 AutoProgress 发布及其 Codex 缓存产物的 SemVer 2.0 版本，与受管项目的策略 schema 版本相互独立。
+_Avoid_: 配置版本、schema 版本、缓存版本
 
 **目标库存（Backlog Target）**:
 改进池希望保有的普通自动 `queued` 改进项数量，用于决定改进发现会话是否需要补充候选项；人工指令项、编译修复和未合并候选项不计入，它是停止发现的软目标而不是必须凑满的配额。
@@ -217,8 +241,16 @@ _Avoid_: Git 游标、改进池状态
 _Avoid_: 改动目标、代码量指标
 
 **拒绝清单（Rejection Register）**:
-随仓库版本控制、记录不得再次提出的改进项及其排除规则的权威集合。
+随仓库版本控制、由具体 `IMP-ID` 拒绝记录目录与预防性拒绝规则文档共同组成的权威集合。
 _Avoid_: 拒绝文档、黑名单
+
+**改进项拒绝记录（Improvement Rejection Record）**:
+以既有 `IMP-ID` 命名、记录人工拒绝理由、排除模式和适用范围的独立文档；拒绝决定与理由必须来自人工。
+_Avoid_: 自动拒绝、关闭 PR、取消状态
+
+**预防性拒绝规则（Proactive Rejection Rule）**:
+在尚无对应改进项时由人工写入单一规则文档、使用稳定 `REJ-<kebab-case>` 标识的排除规则。
+_Avoid_: 虚构 IMP、候选项、拒绝状态
 
 **排除规则（Exclusion Rule）**:
 拒绝清单中对被拒绝方案的共同特征和适用范围所作的明确描述，用于阻止不同 ID 但实质相似的改进项再次进入改进池。

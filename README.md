@@ -1,6 +1,6 @@
 # AutoProgress
 
-AutoProgress 是一个面向 Unity C# 项目的 Codex 插件。它把“寻找改进项”和“实现改进项”组织成受控任务，在有限的每日执行额度内复用环境检查、构建验证和 GitHub PR 流程，并始终保留人工审查与合并权。
+AutoProgress 是一个面向 Unity C# 项目的 Codex 插件。它把“寻找改进项”和“实现改进项”组织成受控任务，为定时实现保留每日额度，同时允许人工不限次数发起任务，并始终保留人工审查与合并权。
 
 核心原则是“代码守门，模型推理”：可形式化的配置与环境校验、版本控制状态转换、重试、恢复和交付事实由可测试脚本处理；模型负责理解意图、设计和编写代码、审查改动，以及解释需要用户处理的问题。成功且无需人工行动的内部阶段保持静默。
 
@@ -10,10 +10,11 @@ AutoProgress 是一个面向 Unity C# 项目的 Codex 插件。它把“寻找�
 - `$discover-improvements`：审查代码并通过 Draft PR 提交候选改进项，不修改产品代码。
 - `$configure-auto-progress`：初始化、迁移、验证、暂停、恢复、查看或导出状态。
 - `$queue-directed-improvement`：录入少量人工指定的改进项，不自动执行。
+- `$record-improvement-rejection`：根据人工提供的 `IMP-ID` 和拒绝理由，创建或完善拒绝记录 Draft PR。
 - 使用确定性检查点恢复中断的任务，并核对本地提交、远端分支和 PR 状态。
 - 由代码直接生成运行记录和最终 PR 报告，事实字段不依赖模型拼接。
 
-除 `$maintain-project` 外，其余入口只能由使用者显式调用。
+除定时 `$maintain-project` 外，其余入口只能由使用者显式调用。人工调用 `$maintain-project` 不占每日额度；只有定时触发的实现任务占用额度。
 
 ## 环境要求
 
@@ -91,7 +92,7 @@ codex plugin add auto-progress@auto-progress-local
 - 单次最多审查 60 个文件、合计 12,000 行源码。
 - 总时长受 `project.max_run_minutes` 限制，默认 60 分钟。
 
-发现任务开始核心审查后即占用当天活动额度，因此当天不再启动实现维护。
+发现任务是人工入口，不占用定时实现的每日额度。它复用仓库外的常驻轻量 worktree，任务结束后以 detached HEAD 停放，不反复创建和删除目录。
 
 ### 实现维护批次
 
@@ -124,7 +125,19 @@ codex plugin add auto-progress@auto-progress-local
 
 暂停不会中断已经开始的任务；当天尚未开始时，则取消当天任务。恢复后不会自动补偿错过的维护日。
 
-`delivered` 表示改进已进入实现 PR；只有随 PR 合入基准分支的 `implemented` 才表示真正完成。
+改进项文件名使用 `IMP-...--queued.md`、`IMP-...--implemented.md` 或 `IMP-...--cancelled.md`。`implemented` 表示 AutoProgress 已成功交付 Draft 实现 PR，不表示已经由人工合并。
+
+### 仓库规范与拒绝策略
+
+配置可逐项声明代码实现需要遵守的仓库规范文档，默认位置为根目录 `AGENTS.md`、`CLAUDE.md` 和 `.github/copilot-instructions.md`。AutoProgress 为每份文档单独保存 Git blob SHA 和仓库外缓存；只有某份文档发生变化时才重新读取该文档。
+
+具体改进项的拒绝记录保存在 `docs/auto-progress/rejections/<IMP-ID>.md`。调用方式：
+
+```text
+使用 $record-improvement-rejection 拒绝 IMP-2026.08.01-xxxxxxxx，理由是：<人工提供的理由>。
+```
+
+如果还没有对应改进项，可直接在 `docs/auto-progress/rejection-rules.md` 中添加 `REJ-<kebab-case>` 规则，描述不希望 AutoProgress 提出的方案模式、理由和范围。两类拒绝都会阻止实质相似的自动候选项；人工指令改进项仍按其显式豁免规则处理。
 
 ## 配置
 
@@ -153,17 +166,25 @@ operation_timeout_minutes = 10
 未经 Unity 编译测试
 ```
 
-### 配置迁移
+### 版本与迁移
 
-旧版 `schema_version = 1` 必须由人工触发迁移：
+当前发布版本是 `0.3.0+codex.20260801090948`。后续发布统一使用 SemVer 2.0 格式 `MAJOR.MINOR.PATCH+codex.YYYYMMDDHHMMSS`，其中 14 位 UTC 时间仅作为 Codex 本地插件缓存标识，不参与 SemVer 版本优先级比较。破坏兼容性的变更提升 MAJOR，向后兼容的新能力或需要兼容迁移的新配置提升 MINOR，兼容修复提升 PATCH。
+
+插件发布版本和项目内 `schema_version` 相互独立。升级到 0.3.0 后，旧项目配置必须由人工显式调用：
 
 ```text
-使用 $configure-auto-progress migrate 将当前项目配置迁移到 v2。
+使用 $configure-auto-progress migrate 迁移当前项目配置。
 ```
 
-迁移会先展示完整差异；确认后只修改配置文件，不会自动 commit 或创建 PR。
+迁移按版本逐段执行。v2 先迁移到 v3；v3 到 v4 的确定性预览命令是：
 
-`schema_version = 3` 使用上述 Unity MCP 配置。迁移 v2 配置时，`enabled = false` 转换为 `disabled`；`enabled = true` 需要人工选择 `optional` 或 `required`，并确认 adapter、URL、项目根和超时。尚未迁移的启用配置会返回 `unity_mcp_migration_required`。
+```powershell
+python <plugin-root>/scripts/auto_progress.py migrate-config-v4 --config .codex/auto-progress.toml --repo .
+```
+
+确认完整差异后，使用同一命令加 `--write` 写入，再运行 `validate-config`。v4 会新增预防性拒绝规则路径，并分别记录 `AGENTS.md`、`CLAUDE.md` 和 `.github/copilot-instructions.md` 当前提交的 Git blob SHA；缺失文档记录空值，之后运行会在文档出现或变化时自行刷新。
+
+旧的无状态后缀 `IMP-ID.md` 不要求批量改名：它仍按 frontmatter 兼容读取，新建改进项使用 `--queued`，成功交付实现 PR 时才随该次状态提交迁移为 `--implemented`。迁移只修改用户确认的配置或正常交付触及的改进项，不会自动 commit、创建迁移 PR 或频繁重命名其余文件。
 
 ## 工作原理
 
@@ -179,7 +200,7 @@ flowchart LR
     D --> C
 ```
 
-- 准备阶段检查配置和环境，从远端基准创建运行分支或临时 worktree，并执行基线验证。失败时恢复本阶段产生的可逆变化。
+- 准备阶段检查配置和环境，从远端基准创建实现分支或复用常驻发现 worktree，并执行适用的基线验证。失败时恢复本阶段产生的可逆变化。
 - 实现阶段由模型理解意图、组合改进项、编写代码和测试，并审查 diff。
 - 交付阶段重新检查实际 diff、修改范围、预算和 Git identity，完成最终验证、commit、push、Draft PR 和工作区恢复。
 - 每个已完成阶段都保存检查点。中断后从最后一个可靠检查点继续；外部状态不明确时请求人工处理。
@@ -195,7 +216,7 @@ flowchart LR
 - 基准分支由人工配置，也是唯一允许的 PR 目标分支。
 - 所有 PR 默认创建为 Draft，永不自动合并。
 - Git 冲突只能由人工解决；自动任务不执行 merge、rebase、force-push、stash、reset 或 clean。
-- 每个维护日最多启动一种 AutoProgress 任务类型。
+- 每个维护日最多占用一次定时实现额度；人工任务不限次数，但仍受工作区、未完成运行和现有 PR 等门禁约束。
 - 没有安全且有价值的工作时允许跳过，不创建空 commit。
 - Unity 未实际刷新与编译验证时，PR 必须明确标注“未经 Unity 编译测试”。
 - 本地运行账本按月追加保存，默认永久保留，只能由人工确认清理。

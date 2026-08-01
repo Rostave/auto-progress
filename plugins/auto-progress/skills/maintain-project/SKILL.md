@@ -9,9 +9,9 @@ Implement one exclusive recovery, compile-repair, or directed item, or a batch o
 
 ## Qualify and claim
 
-1. Generate a run ID and call `prepare-run` with the registered base branch and task type `implement-batch`. It loads the authoritative policy from the frozen base revision, validates adapters and environment, claims the allowance, admits the original workspace, and runs baseline validation.
+1. Generate a run ID and call `prepare-run` with the registered base branch, task type `implement-batch`, and explicit trigger source `manual` or `scheduled`. Only scheduled implementation claims the daily allowance; manual calls are allowance-exempt. It loads the authoritative policy from the frozen base revision, validates adapters and environment, admits the original workspace, and runs baseline validation.
 2. Require scheduled approval or an explicit human early run. Honor the configured pause and deferral semantics.
-3. If `prepare-run` reports `baseline_compile_repair_required`, restrict this run to the base compilation repair. If it reports `recovery_required`, call `recover-run` or stop as directed by its result.
+3. If `prepare-run` reports `baseline_compile_repair_required`, restrict this run to the base compilation repair. If its stage status is `attention`, call `recover-run` or stop as directed by the `recovery` field.
 
 Treat deterministic helper output as authoritative for every condition it covers. Consume successful structured results silently unless the human asks or the final artifact requires disclosure; report failures according to the workflow. Do not spend model reasoning rechecking the same facts or override a failed gate.
 
@@ -29,18 +29,20 @@ Recovery, compile repair, and directed work are never automatically batched. Do 
 
 Before selecting an ordinary item, compare its evidence blob SHAs with the fetched base. Boundedly recheck only recorded evidence and expected paths when they changed. Record `candidate_stale` and try the next authoritative item when the proposal is no longer valid.
 
+Before implementing code, load the repository-guidance cache paths returned by `prepare-run`. Obey every active configured guidance document for implementation, tests, and validation. If an ordinary item conflicts with guidance, leave it queued, record `repository_guidance_conflict`, and try the next item. A guidance conflict fails an exclusive directed, compile-repair, recovery, or review-feedback task. Never use a manual run to bypass repository guidance.
+
 ## Implement and validate
 
 - Work only in the change context admitted by `prepare-run`. Do not recreate its Git or environment checks.
 - Keep each ordinary item inside its item budget and the whole batch inside its aggregate budget.
 - Implement the selected items without staging or committing. Keep expected path ownership disjoint and describe it in the delivery manifest.
 - On a pre-commit item failure, precisely undo only that item's uncommitted edits. On a post-commit failure before push, repair it or revert only that same-run item commit. Never reset or rewrite history.
-- Submit the semantic delivery manifest to `finish-run`. It computes the actual diff and budget, runs final C# and configured Unity MCP validation, verifies the content fingerprint, renders the run record and review, commits, pushes, opens the Draft review, records material events, and restores the workspace.
+- Submit the semantic delivery manifest to `finish-run`. It computes the actual diff and budget, validates, commits and pushes the implementation, opens the Draft review, then creates one batch status commit that renames successfully delivered documents from `--queued.md` to `--implemented.md`. It records material events and restores the workspace.
 - Conflicts always require human resolution. Never merge, rebase, force-push, stash, reset, clean, or auto-resolve.
 
 ## Deliver and restore
 
-- Let `finish-run` perform delivery. On `recovery_required`, preserve the reported state and use `recover-run`; do not repeat commit, push, or review creation manually.
+- Let `finish-run` perform delivery. On stage status `attention`, preserve the reported state and use the reported recovery action; do not repeat commit, push, or review creation manually.
 - Mark Ready only when the matching already-open Unity Editor was refreshed and its C# compilation passed. Otherwise prominently state **未经 Unity 编译测试**.
 - Include the rejection-register notice and never merge the PR.
 - Append ledger events for each item and material Git/PR transition, then restore the original branch and refresh Unity if it was open.

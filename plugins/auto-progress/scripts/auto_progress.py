@@ -39,6 +39,11 @@ SAFE_BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 RUN_ID_PATTERN = re.compile(r"^RUN-\d{4}\.\d{2}\.\d{2}-[0-9a-f]{8}$")
 TASK_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9-]*$")
 PROJECT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
+DEFAULT_REPOSITORY_GUIDANCE = (
+    ("codex", "AGENTS.md"),
+    ("claude", "CLAUDE.md"),
+    ("copilot", ".github/copilot-instructions.md"),
+)
 
 
 class AutoProgressError(RuntimeError):
@@ -92,8 +97,8 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             "schema_version 1 requires a human-invoked "
             "$configure-auto-progress migrate before automatic tasks may run"
         )
-    if schema_version not in {2, 3}:
-        raise AutoProgressError("schema_version must be 2 or 3", "unsupported_schema_version")
+    if schema_version not in {2, 3, 4}:
+        raise AutoProgressError("schema_version must be 2, 3, or 4", "unsupported_schema_version")
 
     project = require_table(config, "project")
     base = project.get("base_branch")
@@ -203,6 +208,39 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             validate_relative_path(value, f"paths.{key}[{index}]")
     for key in ("ideas", "directed", "rejections", "status"):
         validate_relative_path(paths.get(key), f"paths.{key}")
+    if schema_version >= 4:
+        validate_relative_path(paths.get("rejection_rules"), "paths.rejection_rules")
+
+        guidance = require_table(config, "repository_guidance")
+        documents = guidance.get("documents")
+        if not isinstance(documents, list) or not documents:
+            raise AutoProgressError(
+                "at least one [[repository_guidance.documents]] entry is required"
+            )
+        seen_guidance_paths: set[str] = set()
+        for index, document in enumerate(documents):
+            field = f"repository_guidance.documents[{index}]"
+            if not isinstance(document, dict):
+                raise AutoProgressError(f"{field} must be a table")
+            unexpected = sorted(set(document) - {"agent", "path", "blob_sha"})
+            if unexpected:
+                raise AutoProgressError(
+                    f"{field} contains unsupported fields: {', '.join(unexpected)}"
+                )
+            agent = document.get("agent")
+            if not isinstance(agent, str) or not agent.strip():
+                raise AutoProgressError(f"{field}.agent must be a non-empty string")
+            path = document.get("path")
+            validate_relative_path(path, f"{field}.path")
+            normalized_path = str(path).replace("\\", "/")
+            if normalized_path in seen_guidance_paths:
+                raise AutoProgressError(f"duplicate repository guidance path: {normalized_path}")
+            seen_guidance_paths.add(normalized_path)
+            blob_sha = document.get("blob_sha", "")
+            if not isinstance(blob_sha, str) or (
+                blob_sha and not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", blob_sha)
+            ):
+                raise AutoProgressError(f"{field}.blob_sha must be empty or a Git object ID")
 
     validation = require_table(config, "validation")
     steps = validation.get("steps")
@@ -380,6 +418,60 @@ def migrate_config_v3(
     return validate_config(migrated)
 
 
+def _repository_guidance_blob_sha(repo: Path, relative_path: str) -> str:
+    validate_relative_path(relative_path, "repository guidance path")
+    result = git(repo, "rev-parse", f"HEAD:{relative_path}", check=False)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def migrate_config_v4(config: dict[str, Any], *, repo: Path) -> dict[str, Any]:
+    """Return a v4 copy with rejection rules and per-document guidance SHAs."""
+    if config.get("schema_version") != 3:
+        raise AutoProgressError("only schema_version 3 can migrate to v4", "migration_source_invalid")
+
+    repository = repo.resolve()
+    inside = git(repository, "rev-parse", "--is-inside-work-tree").stdout.strip()
+    if inside != "true":
+        raise AutoProgressError("migration repository is not a Git worktree", "migration_repository_invalid")
+
+    migrated = copy.deepcopy(config)
+    migrated["schema_version"] = 4
+    paths = require_table(migrated, "paths")
+    paths.setdefault("rejection_rules", "docs/auto-progress/rejection-rules.md")
+
+    guidance = migrated.setdefault("repository_guidance", {})
+    if not isinstance(guidance, dict):
+        raise AutoProgressError("[repository_guidance] must be a table", "migration_source_invalid")
+    documents = guidance.get("documents")
+    if documents is None:
+        documents = [
+            {"agent": agent, "path": path}
+            for agent, path in DEFAULT_REPOSITORY_GUIDANCE
+        ]
+    if not isinstance(documents, list) or not documents:
+        raise AutoProgressError(
+            "repository_guidance.documents must be a non-empty array",
+            "migration_source_invalid",
+        )
+
+    migrated_documents: list[dict[str, Any]] = []
+    for document in documents:
+        if not isinstance(document, dict):
+            raise AutoProgressError(
+                "repository_guidance.documents entries must be tables",
+                "migration_source_invalid",
+            )
+        migrated_document = copy.deepcopy(document)
+        relative_path = migrated_document.get("path")
+        validate_relative_path(relative_path, "repository_guidance.documents.path")
+        migrated_document["blob_sha"] = _repository_guidance_blob_sha(
+            repository, str(relative_path).replace("\\", "/")
+        )
+        migrated_documents.append(migrated_document)
+    guidance["documents"] = migrated_documents
+    return validate_config(migrated)
+
+
 def _toml_value(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -417,6 +509,28 @@ def dump_toml(config: dict[str, Any]) -> str:
                     lines.append(f"{item_key} = {_toml_value(item_value)}")
                 lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def config_migration_result(
+    path: Path, before: str, migrated: dict[str, Any], *, write: bool
+) -> dict[str, Any]:
+    after = dump_toml(migrated)
+    diff = "".join(
+        difflib.unified_diff(
+            before.splitlines(keepends=True),
+            after.splitlines(keepends=True),
+            fromfile=str(path),
+            tofile=str(path),
+        )
+    )
+    if write:
+        temporary = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+        try:
+            temporary.write_text(after, encoding="utf-8", newline="\n")
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return {"ok": True, "written": write, "diff": diff}
 
 
 def normalize_remote(remote: str) -> str:
@@ -689,13 +803,24 @@ def claim_daily_allowance(
     timezone: str,
     run_id: str,
     task_type: str,
+    trigger_source: str,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Atomically claim the single daily activity allowance for one task instance."""
+    """Claim the scheduled implementation allowance; manual work is exempt."""
     if not RUN_ID_PATTERN.fullmatch(run_id):
         raise AutoProgressError("run_id must use RUN-YYYY.MM.DD-xxxxxxxx")
     if not TASK_TYPE_PATTERN.fullmatch(task_type):
         raise AutoProgressError("task_type must be lowercase kebab-case")
+    if trigger_source not in {"manual", "scheduled"}:
+        raise AutoProgressError("trigger_source must be manual or scheduled")
+    if trigger_source == "manual" or task_type != "implement-batch":
+        return {
+            "claimed": False,
+            "exempt": True,
+            "trigger_source": trigger_source,
+            "run_id": run_id,
+            "task_type": task_type,
+        }
 
     zone = ZoneInfo(timezone)
     local = now.astimezone(zone) if now else datetime.now(zone)
@@ -707,6 +832,7 @@ def claim_daily_allowance(
         "timestamp": local.isoformat(),
         "run_id": run_id,
         "task_type": task_type,
+        "trigger_source": trigger_source,
     }
     validate_event_value(event)
 
@@ -731,6 +857,7 @@ def claim_daily_allowance(
                 if (
                     prior.get("run_id") == run_id
                     and prior.get("task_type") == task_type
+                    and prior.get("trigger_source", "legacy") in {trigger_source, "legacy"}
                 ):
                     return {
                         "claimed": False,
@@ -738,6 +865,7 @@ def claim_daily_allowance(
                         "maintenance_day": maintenance_day,
                         "run_id": run_id,
                         "task_type": task_type,
+                        "trigger_source": trigger_source,
                         "event_id": prior.get("event_id"),
                     }
                 raise AutoProgressError(
@@ -761,6 +889,7 @@ def claim_daily_allowance(
         "maintenance_day": maintenance_day,
         "run_id": run_id,
         "task_type": task_type,
+        "trigger_source": trigger_source,
         "event_id": event["event_id"],
         "ledger": str(destination),
     }
@@ -805,6 +934,7 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
     directed_queued: set[str] = set()
     directed_terminal: set[str] = set()
     allowance_days_by_task: dict[str, set[str]] = defaultdict(set)
+    legacy_allowance_days: set[str] = set()
     task_runs: dict[str, set[str]] = defaultdict(set)
     task_results: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     task_durations: dict[str, list[float]] = defaultdict(list)
@@ -834,14 +964,17 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
         pr = event.get("pull_request")
         item = event.get("improvement_id")
         if event_type == "daily_allowance_claimed" and isinstance(task_type, str):
-            allowance_days_by_task[task_type].add(str(event.get("maintenance_day")))
+            if event.get("trigger_source") == "scheduled" and task_type == "implement-batch":
+                allowance_days_by_task[task_type].add(str(event.get("maintenance_day")))
+            else:
+                legacy_allowance_days.add(str(event.get("maintenance_day")))
         if isinstance(task_type, str) and isinstance(run_id, str):
             task_runs[task_type].add(run_id)
         result_name = {
-            "run_succeeded": "success",
+            "run_succeeded": "succeeded",
             "run_skipped": "skipped",
             "run_failed": "failed",
-            "run_timed_out": "timed_out",
+            "run_timed_out": "failed",
         }.get(event_type)
         if result_name and isinstance(task_type, str):
             task_results[task_type][result_name] += 1
@@ -865,7 +998,8 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
             directed_terminal.add(item)
         implementation_key = {
             "maintenance_batch_started": "batches",
-            "improvement_delivered": "delivered",
+            "improvement_implemented": "implemented",
+            "improvement_delivered": "legacy_delivered",
             "improvement_deferred": "deferred",
             "improvement_reverted": "reverted",
             "candidate_stale": "candidate_stale",
@@ -914,16 +1048,25 @@ def summarize_events(events: list[dict[str, Any]]) -> dict[str, Any]:
         "pending_recovery": len(committed_items - pr_items),
         "directed_pending": len(directed_queued - directed_terminal),
         "allowance_days": len(all_allowance_days),
+        "legacy_allowance_days": len(legacy_allowance_days),
         "allowance_days_by_task_type": {
             key: len(value) for key, value in sorted(allowance_days_by_task.items())
         },
         "implementation": {
             "runs": len(task_runs.get("implement-batch", set())),
             "batches": implementation_counts["batches"],
-            "delivered": implementation_counts["delivered"],
-            "deferred": implementation_counts["deferred"],
-            "reverted": implementation_counts["reverted"],
-            "candidate_stale": implementation_counts["candidate_stale"],
+            "implemented": implementation_counts["implemented"],
+            "skipped": (
+                implementation_counts["deferred"]
+                + implementation_counts["reverted"]
+                + implementation_counts["candidate_stale"]
+            ),
+            "skip_reasons": {
+                "deferred": implementation_counts["deferred"],
+                "reverted": implementation_counts["reverted"],
+                "candidate_stale": implementation_counts["candidate_stale"],
+            },
+            "legacy_delivered": implementation_counts["legacy_delivered"],
         },
         "discovery": {
             "sessions": len(task_runs.get("discover-improvements", set())),
@@ -952,6 +1095,11 @@ def parser() -> argparse.ArgumentParser:
     migrate.add_argument("--connect-timeout-seconds", type=int, default=5)
     migrate.add_argument("--operation-timeout-minutes", type=int, default=10)
     migrate.add_argument("--write", action="store_true")
+
+    migrate_v4 = subcommands.add_parser("migrate-config-v4")
+    migrate_v4.add_argument("--config", type=Path, required=True)
+    migrate_v4.add_argument("--repo", type=Path, required=True)
+    migrate_v4.add_argument("--write", action="store_true")
 
     new_id = subcommands.add_parser("new-id")
     new_id.add_argument(
@@ -983,6 +1131,7 @@ def parser() -> argparse.ArgumentParser:
     claim.add_argument("--timezone", default="Asia/Shanghai")
     claim.add_argument("--run-id", required=True)
     claim.add_argument("--task-type", required=True)
+    claim.add_argument("--trigger-source", choices=("manual", "scheduled"), required=True)
     claim.add_argument("--state-root", type=Path, default=default_state_root())
 
     summary = subcommands.add_parser("status")
@@ -999,7 +1148,7 @@ def parser() -> argparse.ArgumentParser:
     prepare.add_argument("--state-root", type=Path, default=default_state_root())
     prepare.add_argument("--gh", default="gh")
     prepare.add_argument("--skip-github", action="store_true")
-    prepare.add_argument("--no-claim-allowance", action="store_true")
+    prepare.add_argument("--trigger-source", choices=("manual", "scheduled"), required=True)
 
     finish = subcommands.add_parser("finish-run")
     finish.add_argument("--project-id", required=True)
@@ -1031,23 +1180,18 @@ def main(argv: list[str] | None = None) -> int:
                 connect_timeout_seconds=arguments.connect_timeout_seconds,
                 operation_timeout_minutes=arguments.operation_timeout_minutes,
             )
-            after = dump_toml(migrated)
-            diff = "".join(
-                difflib.unified_diff(
-                    before.splitlines(keepends=True),
-                    after.splitlines(keepends=True),
-                    fromfile=str(arguments.config),
-                    tofile=str(arguments.config),
-                )
+            output = config_migration_result(
+                path, before, migrated, write=arguments.write
             )
-            if arguments.write:
-                temporary = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
-                try:
-                    temporary.write_text(after, encoding="utf-8", newline="\n")
-                    os.replace(temporary, path)
-                finally:
-                    temporary.unlink(missing_ok=True)
-            output = {"ok": True, "written": arguments.write, "diff": diff}
+        elif arguments.command == "migrate-config-v4":
+            path = arguments.config.resolve()
+            before = path.read_text(encoding="utf-8")
+            migrated = migrate_config_v4(
+                load_config(path), repo=arguments.repo.resolve()
+            )
+            output = config_migration_result(
+                path, before, migrated, write=arguments.write
+            )
         elif arguments.command == "new-id":
             output = {"id": make_id(arguments.kind, arguments.timezone)}
         elif arguments.command == "project-id":
@@ -1085,6 +1229,7 @@ def main(argv: list[str] | None = None) -> int:
                     arguments.timezone,
                     arguments.run_id,
                     arguments.task_type,
+                    arguments.trigger_source,
                 ),
             }
         elif arguments.command == "status":
@@ -1107,7 +1252,7 @@ def main(argv: list[str] | None = None) -> int:
                 arguments.state_root.resolve(),
                 gh_program=arguments.gh,
                 skip_github=arguments.skip_github,
-                claim_allowance=not arguments.no_claim_allowance,
+                trigger_source=arguments.trigger_source,
             )
         elif arguments.command == "finish-run":
             import workflow

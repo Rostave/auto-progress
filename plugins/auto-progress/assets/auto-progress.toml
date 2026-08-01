@@ -1,4 +1,4 @@
-schema_version = 3
+schema_version = 4
 
 [project]
 base_branch = "feature/your-base-branch"
@@ -12,6 +12,24 @@ review_host = "github"
 
 [workspace]
 additional_ignore_patterns = []
+
+# Repository guidance is cached per document by Git blob SHA. Configure may
+# fill blob_sha when the document exists; an empty value means "not present at
+# configuration time" and is refreshed automatically if the file appears.
+[[repository_guidance.documents]]
+agent = "codex"
+path = "AGENTS.md"
+blob_sha = ""
+
+[[repository_guidance.documents]]
+agent = "claude"
+path = "CLAUDE.md"
+blob_sha = ""
+
+[[repository_guidance.documents]]
+agent = "copilot"
+path = ".github/copilot-instructions.md"
+blob_sha = ""
 
 [schedule]
 window_start = "19:30"
@@ -67,6 +85,7 @@ excluded = [
 ideas = "docs/auto-progress/improvements"
 directed = "docs/auto-progress/directed"
 rejections = "docs/auto-progress/rejections"
+rejection_rules = "docs/auto-progress/rejection-rules.md"
 status = "docs/auto-progress/status.md"
 
 [[validation.steps]]

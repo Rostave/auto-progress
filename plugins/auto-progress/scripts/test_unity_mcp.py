@@ -161,7 +161,7 @@ class UnityMcpTransportTests(unittest.TestCase):
                     unity_config(url), project, "fingerprint-json"
                 )
         self.assertTrue(result["verified"])
-        self.assertEqual("verified", result["status"])
+        self.assertNotIn("status", result)
         self.assertEqual("fingerprint-json", result["content_fingerprint"])
         self.assertEqual("2025-06-18", result["protocol_version"])
 
@@ -183,7 +183,7 @@ class UnityMcpTransportTests(unittest.TestCase):
                     unity_config(url, "optional"), project, "fingerprint-optional"
                 )
         self.assertFalse(result["verified"])
-        self.assertEqual("unity_unverified", result["status"])
+        self.assertNotIn("status", result)
         self.assertEqual("unity_mcp_tool_mismatch", result["reason_code"])
 
     def test_required_contract_failure_blocks_delivery(self) -> None:

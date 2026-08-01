@@ -1,15 +1,15 @@
 {
   "name": "auto-progress",
-  "version": "0.2.0+codex.20260731191238",
-  "description": "Guarded Unity C# improvement discovery and batch maintenance with human-reviewed pull requests.",
+  "version": "0.3.0+codex.20260801090948",
+  "description": "Guarded Unity C# improvement discovery, rejection policy, and batch maintenance with human-reviewed pull requests.",
   "author": {
     "name": "AutoProgress Contributors"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "Auto Progress",
-    "shortDescription": "Discover and batch Unity C# improvements safely.",
-    "longDescription": "Discover review-ready Unity C# candidates in bounded manual sessions, then implement compatible batches while preserving daily resource limits and human merge control.",
+    "shortDescription": "Discover, reject, and batch Unity C# improvements safely.",
+    "longDescription": "Discover review-ready Unity C# candidates in bounded manual sessions, manage human rejection policy, and implement compatible batches while reserving daily limits for scheduled work and preserving human merge control.",
     "developerName": "AutoProgress Contributors",
     "category": "Productivity",
     "capabilities": [
@@ -19,6 +19,7 @@
     "defaultPrompt": [
       "Configure AutoProgress for this Unity repository.",
       "Use $discover-improvements to replenish the improvement backlog.",
+      "Use $record-improvement-rejection to record a human-decided rejection.",
       "Show the current AutoProgress status."
     ]
   }

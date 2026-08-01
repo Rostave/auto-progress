@@ -254,7 +254,7 @@ def _render_implement(manifest: Mapping[str, Any], facts: Mapping[str, Any]) -> 
     for index, item in enumerate(improvements):
         item_id = _inline(item["id"], f"improvements[{index}].id")
         actual = _improvement_fact(facts, _text(item["id"], "improvement.id"))
-        result = _inline(actual.get("result", "delivered"), "fact.result")
+        result = _inline(actual.get("result", "succeeded"), "fact.result")
         reason = _inline(actual.get("reason", ""), "fact.reason")
         revision = _inline(actual.get("revision", "pending"), "fact.revision")
         source = _inline(item.get("source", "automatic"), f"improvements[{index}].source")
@@ -295,7 +295,7 @@ def _render_implement(manifest: Mapping[str, Any], facts: Mapping[str, Any]) -> 
         "",
         "---",
         "",
-        "若不想后续出现某项或实质相似方案，请按改进项 ID 将方案写入拒绝清单，并描述排除规则与适用范围。",
+        "若不想后续出现某项或实质相似方案，请按 IMP-ID 创建具体拒绝记录；尚无改进项时请添加 REJ-... 预防性规则。",
     ])
     return title, "\n".join(lines) + "\n"
 
@@ -342,7 +342,7 @@ def _render_discovery(manifest: Mapping[str, Any], facts: Mapping[str, Any]) -> 
         "",
         "---",
         "",
-        "若不想后续出现某项或实质相似方案，请使用对应改进项 ID，由人工将方案及排除范围写入拒绝清单。",
+        "若不想后续出现某项或实质相似方案，请按 IMP-ID 创建具体拒绝记录；尚无改进项时请添加 REJ-... 预防性规则。",
     ])
     return title, "\n".join(lines) + "\n"
 
@@ -379,7 +379,7 @@ def _render_run_record(manifest: Mapping[str, Any], facts: Mapping[str, Any]) ->
         cells = [
             f"`{_inline(identity, f'improvements[{index}].id')}`",
             _inline(item.get("source", "automatic"), f"improvements[{index}].source"),
-            _inline(actual.get("result", "delivered"), "fact.result"),
+            _inline(actual.get("result", "succeeded"), "fact.result"),
             _inline(actual.get("reason", ""), "fact.reason"),
             _inline(item.get("selection_reason", ""), f"improvements[{index}].selection_reason"),
             _inline(item.get("summary", ""), f"improvements[{index}].summary"),

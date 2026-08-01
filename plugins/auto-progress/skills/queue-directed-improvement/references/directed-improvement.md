@@ -5,7 +5,7 @@ Create one tracked Markdown file per item under the configured directed-item dir
 Required fields:
 
 - improvement ID;
-- state (`pending` initially);
+- state (`queued` initially);
 - priority;
 - intent and reason;
 - acceptance criteria;

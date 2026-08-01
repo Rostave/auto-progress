@@ -218,7 +218,6 @@ def verify_unity(
     mode = config.get("mode")
     if mode == "disabled":
         return {
-            "status": "unity_unverified",
             "reason_code": "unity_mcp_disabled",
             "verified": False,
             "content_fingerprint": content_fingerprint,
@@ -336,7 +335,6 @@ def verify_unity(
     if errors:
         raise UnityMcpError("unity_compile_errors", f"Unity reported {len(errors)} error entries")
     return {
-        "status": "verified",
         "reason_code": "unity_compilation_passed",
         "verified": True,
         "adapter": adapter.adapter_id,
@@ -353,7 +351,6 @@ def run_verification(config: dict[str, Any], project_root: Path, fingerprint: st
     except UnityMcpError as exc:
         if mode == "optional":
             return {
-                "status": "unity_unverified",
                 "reason_code": exc.reason_code,
                 "summary": exc.summary,
                 "verified": False,

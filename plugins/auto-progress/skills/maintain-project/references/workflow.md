@@ -7,7 +7,7 @@ Use the configured IANA timezone. IDs use local dates:
 - improvement: `IMP-YYYY.MM.DD-xxxxxxxx`
 - run: `RUN-YYYY.MM.DD-xxxxxxxx`
 
-After eligibility and approval, call the shared `claim-allowance` command with `implement-batch`. A claim by another task type prevents implementation that day. A work-branch `commit_created` or `branch_pushed` completes the implementation maintenance day even when PR creation remains pending.
+Pass `trigger_source=scheduled` for an approved automation and `trigger_source=manual` for an explicit human call. Only scheduled `implement-batch` claims the daily allowance. Manual calls never read, claim, or complete that allowance, although workspace, recovery, and open-review gates still apply.
 
 ## Hard safety and workspace lease
 
@@ -52,11 +52,11 @@ Implement items sequentially. Every item gets an independent commit referencing 
 - Re-run final validation and deliver successful items together.
 - If isolation, revert, or validation is unsafe, stop and preserve pending recovery.
 
-Record each item as `delivered`, `deferred`, or `reverted`. A delivered item becomes `implemented` only when the PR is merged into the base branch.
+Keep unsuccessful items `queued` and record their reason only in the ledger. After the Draft review exists, one batch status commit renames every successful document to `--implemented.md`; `implemented` means AutoProgress successfully delivered the Draft review, not that a human merged it.
 
 ## Unity and PR
 
-If Unity is already open for the exact project root and the configured MCP adapter is available, refresh after checkout and inspect compiler results through Unity MCP. Optional MCP absence or failure does not block workspace admission; record `unity_unverified`. Only a passing refresh/compile allows Ready status. Otherwise the Draft PR must say **未经 Unity 编译测试**.
+If Unity is already open for the exact project root and the configured MCP adapter is available, refresh after checkout and inspect compiler results through Unity MCP. Optional MCP absence or failure does not block workspace admission; record `unity.verified = false` and its reason. Only a passing refresh/compile allows Ready status. Otherwise the Draft PR must say **未经 Unity 编译测试**.
 
 Use branch:
 

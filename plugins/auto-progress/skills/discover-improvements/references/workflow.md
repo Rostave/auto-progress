@@ -10,17 +10,11 @@ python <plugin-root>/scripts/auto_progress.py preflight --mode discovery --repo 
 
 Use read-only GitHub queries to find an open/Draft discovery PR. Count target inventory only from automatic-discovery documents already present on `origin/<base_branch>` with state `queued`. Do not count directed items, compile repair, stale items, or candidates from an unmerged PR.
 
-Only after these checks create a run ID and call:
-
-```text
-python <plugin-root>/scripts/auto_progress.py claim-allowance --project-id <id> --timezone <zone> --run-id <RUN-ID> --task-type discover-improvements
-```
-
-An existing claim for the same run and task type is a safe retry. Any other claim stops the session.
+Discovery is human-only and never claims the scheduled implementation allowance.
 
 ## Worktree and slice
 
-Call `prepare-run` with the registered base branch and task type `discover-improvements`. It fetches `origin`, freezes and validates the base policy, claims the allowance, and creates the temporary lightweight worktree and branch. Treat its structured result as authoritative; do not reproduce the Git transition in model reasoning.
+Call `prepare-run` with the registered base branch, task type `discover-improvements`, and trigger source `manual`. It fetches `origin`, freezes and validates the base policy, and reuses the project-level persistent lightweight worktree. Treat its structured result as authoritative; do not reproduce the Git transition in model reasoning.
 
 Use branch:
 
@@ -40,7 +34,7 @@ Start with `initial_files`. If useful time remains and fewer than the allowed ca
 
 ## Candidate document
 
-Use a fresh stable `IMP-...` ID. Record:
+Use a fresh stable `IMP-...` ID and filename `IMP-...--queued.md`. Record:
 
 - value, confidence, risk, and estimated size;
 - module, evidence paths, expected paths, validation profile, and batch affinity;

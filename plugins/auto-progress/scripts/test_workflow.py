@@ -242,10 +242,10 @@ class GitWorkflowTests(unittest.TestCase):
                 "main",
                 state_root,
                 skip_github=True,
-                claim_allowance=False,
+                trigger_source="manual",
             )
 
-            self.assertEqual("failed_restored", result["status"])
+            self.assertEqual("failed", result["status"])
             self.assertEqual("dirty_workspace", result["reason_code"])
             self.assertEqual("main", run_git(repo, "branch", "--show-current"))
             self.assertEqual(original_head, run_git(repo, "rev-parse", "HEAD"))
@@ -274,7 +274,21 @@ class GitWorkflowTests(unittest.TestCase):
             text = text[:start] + '[unity_mcp]\nmode = "disabled"\n'
             (repo / ".codex").mkdir()
             (repo / ".codex" / "auto-progress.toml").write_text(text, encoding="utf-8")
-            run_git(repo, "add", ".codex/auto-progress.toml")
+            (repo / "AGENTS.md").write_text("Keep changes focused.\n", encoding="utf-8")
+            improvement_dir = repo / "docs" / "auto-progress" / "improvements"
+            improvement_dir.mkdir(parents=True)
+            queued = improvement_dir / "IMP-2026.07.30-a1b2c3d4--queued.md"
+            queued.write_text(
+                "---\nid: IMP-2026.07.30-a1b2c3d4\nstate: queued\n---\n\n# Improvement\n",
+                encoding="utf-8",
+            )
+            run_git(
+                repo,
+                "add",
+                ".codex/auto-progress.toml",
+                "AGENTS.md",
+                str(queued.relative_to(repo)),
+            )
             run_git(repo, "commit", "-m", "configure v3")
             remote = root / "origin.git"
             subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True, text=True)
@@ -285,9 +299,22 @@ class GitWorkflowTests(unittest.TestCase):
 
             prepared = workflow.prepare_run(
                 repo, RUN_ID, "implement-batch", "main", state_root,
-                skip_github=True, claim_allowance=False,
+                skip_github=True, trigger_source="manual",
             )
             self.assertEqual("completed", prepared["status"])
+            guidance = prepared["facts"]["repository_guidance"]
+            agents = next(item for item in guidance["documents"] if item["path"] == "AGENTS.md")
+            self.assertTrue(agents["changed"])
+            self.assertTrue(Path(agents["cache_path"]).exists())
+            project_id = auto_progress.make_project_id(str(remote), "main")
+            reused_guidance = workflow._refresh_repository_guidance(
+                repo, workflow.StateStore(state_root).load(project_id, RUN_ID)["config"],
+                workflow.StateStore(state_root), project_id,
+            )
+            reused_agents = next(
+                item for item in reused_guidance["documents"] if item["path"] == "AGENTS.md"
+            )
+            self.assertFalse(reused_agents["changed"])
             (repo / "Assets" / "Delivered.cs").write_text("class Delivered {}\n", encoding="utf-8")
             manifest = root / "manifest.json"
             manifest.write_text(
@@ -307,8 +334,6 @@ class GitWorkflowTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            project_id = auto_progress.make_project_id(str(remote), "main")
-
             finished = workflow.finish_run(project_id, RUN_ID, manifest, state_root)
 
             self.assertEqual("completed", finished["status"], finished)
@@ -318,7 +343,23 @@ class GitWorkflowTests(unittest.TestCase):
             self.assertTrue(run_git(repo, "ls-remote", "--heads", "origin", branch))
             state = workflow.StateStore(state_root).load(project_id, RUN_ID)
             self.assertTrue(state["terminal"])
-            self.assertEqual("delivered", state["terminal_result"])
+            self.assertEqual("succeeded", state["terminal_result"])
+            self.assertIn("status_revision", state)
+            tree = run_git(repo, "ls-tree", "-r", "--name-only", f"origin/{branch}")
+            self.assertIn(
+                "docs/auto-progress/improvements/IMP-2026.07.30-a1b2c3d4--implemented.md",
+                tree,
+            )
+            self.assertNotIn(
+                "docs/auto-progress/improvements/IMP-2026.07.30-a1b2c3d4--queued.md",
+                tree,
+            )
+            summary = auto_progress.summarize_events(
+                auto_progress.read_events(
+                    auto_progress.ledger_files(state_root / "ledger", project_id)
+                )
+            )
+            self.assertEqual(1, summary["implementation"]["implemented"])
 
     def test_rename_delivery_stages_old_and_new_paths(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -344,7 +385,7 @@ class GitWorkflowTests(unittest.TestCase):
             state_root = root / "state"
             self.assertEqual(
                 "completed",
-                workflow.prepare_run(repo, RUN_ID, "implement-batch", "main", state_root, skip_github=True, claim_allowance=False)["status"],
+                workflow.prepare_run(repo, RUN_ID, "implement-batch", "main", state_root, skip_github=True, trigger_source="manual")["status"],
             )
             (repo / "Assets" / "Base.cs").rename(repo / "Assets" / "Renamed.cs")
             manifest = root / "rename.json"
@@ -369,7 +410,7 @@ class GitWorkflowTests(unittest.TestCase):
             self.assertNotIn("Assets/Base.cs", tree)
             self.assertFalse(run_git(repo, "status", "--porcelain"))
 
-    def test_discovery_finish_renders_and_removes_worktree(self) -> None:
+    def test_discovery_finish_renders_and_parks_persistent_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             repo = self.make_repo(root)
@@ -388,15 +429,18 @@ class GitWorkflowTests(unittest.TestCase):
             state_root = root / "state"
             prepared = workflow.prepare_run(
                 repo, RUN_ID, "discover-improvements", "main", state_root,
-                skip_github=True, claim_allowance=False,
+                skip_github=True, trigger_source="manual",
             )
             self.assertEqual("completed", prepared["status"], prepared)
             project_id = auto_progress.make_project_id(str(remote), "main")
             state = workflow.StateStore(state_root).load(project_id, RUN_ID)
             worktree = Path(state["workspace_path"])
-            candidate = worktree / "docs" / "auto-progress" / "improvements" / "IMP-2026.08.01-22222222.md"
+            candidate = worktree / "docs" / "auto-progress" / "improvements" / "IMP-2026.08.01-22222222--queued.md"
             candidate.parent.mkdir(parents=True)
-            candidate.write_text("# Candidate\n", encoding="utf-8")
+            candidate.write_text(
+                "---\nid: IMP-2026.08.01-22222222\nstate: queued\n---\n\n# Candidate\n",
+                encoding="utf-8",
+            )
             manifest = root / "discovery.json"
             manifest.write_text(json.dumps({
                 "improvements": [{
@@ -404,7 +448,7 @@ class GitWorkflowTests(unittest.TestCase):
                     "summary": "Document a bounded candidate.",
                     "acceptance": "The candidate is reviewable.",
                     "design_tradeoffs": "Documentation only.",
-                    "expected_paths": ["docs/auto-progress/improvements/IMP-2026.08.01-22222222.md"],
+                    "expected_paths": ["docs/auto-progress/improvements/IMP-2026.08.01-22222222--queued.md"],
                 }],
                 "run_record_path": f"docs/auto-progress/runs/{RUN_ID}.md",
             }), encoding="utf-8")
@@ -412,7 +456,8 @@ class GitWorkflowTests(unittest.TestCase):
             result = workflow.finish_run(project_id, RUN_ID, manifest, state_root)
 
             self.assertEqual("completed", result["status"], result)
-            self.assertFalse(worktree.exists())
+            self.assertTrue(worktree.exists())
+            self.assertEqual("", run_git(worktree, "branch", "--show-current"))
             state = workflow.StateStore(state_root).load(project_id, RUN_ID)
             self.assertTrue(state["terminal"])
 
@@ -440,7 +485,7 @@ class GitWorkflowTests(unittest.TestCase):
             state_root = root / "state"
             prepared = workflow.prepare_run(
                 repo, RUN_ID, "implement-batch", "main", state_root,
-                skip_github=True, claim_allowance=False,
+                skip_github=True, trigger_source="manual",
             )
             self.assertEqual("completed", prepared["status"])
             (repo / "Assets" / "One.cs").write_text("class One {}\n", encoding="utf-8")

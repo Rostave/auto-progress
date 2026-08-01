@@ -1,0 +1,7 @@
+interface:
+  display_name: "Record Improvement Rejection"
+  short_description: "Record a human-decided IMP-ID rejection"
+  default_prompt: "Use $record-improvement-rejection to record my rejection of an AutoProgress improvement."
+
+policy:
+  allow_implicit_invocation: false

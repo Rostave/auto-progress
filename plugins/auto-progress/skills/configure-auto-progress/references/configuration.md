@@ -6,7 +6,7 @@ Automatic tasks load this contract from the immutable base SHA recorded by `fetc
 
 ## Required model
 
-- The implemented schema version is `3`. Version 2 with `enabled = false` is interpreted as disabled for compatibility; an enabled version-2 Unity MCP configuration requires explicit human migration before an automatic task can claim the daily allowance.
+- The implemented schema version is `4`. Older schemas remain readable only for their documented migration and compatibility paths.
 - Version 1 must be migrated through a human-invoked `$configure-auto-progress migrate`; automatic tasks stop before claiming the daily allowance when they encounter it.
 - `[project].base_branch` is the sole work source and pull-request target.
 - `[project].timezone` is an IANA zone, normally `Asia/Shanghai`.
@@ -15,8 +15,10 @@ Automatic tasks load this contract from the immutable base SHA recorded by `fetc
 - Budget values are positive and satisfy suggested ≤ hard ≤ directed absolute.
 - Paths are repository-relative and may not escape the repository.
 - `[workspace].additional_ignore_patterns` is an optional empty-by-default list of repository-relative Git-ignore-style patterns. It filters only otherwise-untracked paths during workspace admission; absolute paths, `..`, repository escape, and `!` negation are invalid, and it never exempts tracked or staged state.
+- `[[repository_guidance.documents]]` stores one `agent`, repository-relative `path`, and initial `blob_sha` per guidance document. Configure the default Codex, Claude, and Copilot paths separately. Implementation compares each Git blob independently and rereads only documents whose SHA changed; current cache state is stored outside the repository.
+- `[paths].rejection_rules` points to the single human-authored proactive rejection-rule document. `[paths].rejections` remains the directory of one record per rejected `IMP-ID`.
 - The implemented Unity MCP contract uses `[unity_mcp].mode = "disabled" | "optional" | "required"`, a trusted `adapter` ID, `transport = "streamable_http"`, a complete loopback `url`, expected project root, and bounded connect/operation timeouts. The deterministic entry point—not the model—calls MCP, validates initialize/tool/resource schemas through the registered adapter, and verifies project identity and content fingerprint.
-- In `optional` mode, an open Editor with no usable MCP connection falls back to structured C# validation and does not block workspace admission; record `unity_unverified` and keep the review Draft. In `required` mode the same condition blocks delivery.
+- In `optional` mode, an open Editor with no usable MCP connection falls back to structured C# validation and does not block workspace admission; record `unity.verified = false` with a reason and keep the review Draft. In `required` mode the same condition blocks delivery.
 
 ## Version 1 to version 2 migration
 
@@ -42,6 +44,12 @@ Preview with `python <plugin-root>/scripts/auto_progress.py migrate-config-v3 --
 - Legacy `provider` may suggest a known adapter mapping but cannot confirm it automatically and is not a network endpoint.
 - Automatic tasks encountering an enabled legacy configuration stop before the daily allowance with `unity_mcp_migration_required`.
 
+## Version 3 to version 4 repository-policy migration
+
+Preview with `python <plugin-root>/scripts/auto_progress.py migrate-config-v4 --config .codex/auto-progress.toml --repo <repository-root>`. The migration preserves existing policy, adds `[paths].rejection_rules`, and creates or preserves `[[repository_guidance.documents]]` entries while resolving each configured path to its own committed Git blob SHA. A missing document receives an empty SHA. After human approval, repeat the exact command with `--write`, initialize the rejection-rule document from the plugin asset if it is absent, then run `validate-config`.
+
+Do not bulk-rename legacy `IMP-ID.md` files. They remain readable from frontmatter and migrate to a state-suffixed filename only when a normal lifecycle transition touches that specific improvement.
+
 ## Pause semantics
 
 `paused = true` prevents future runs. It does not interrupt an already-started run. If the maintenance day has not started, pausing cancels that day. Resuming does not backfill missed days unless a human explicitly requests an early run.
@@ -55,16 +63,17 @@ Status is derived from ledger events, not inferred from GitHub's contribution gr
 - `pr_opened`: distinct pull requests recorded as opened.
 - `skipped_days`: distinct days ending in `run_skipped` with no completion event.
 - `failed_days`: distinct days ending in `run_failed` with no later completion event.
-- `pending_recovery`: committed/pushed work without a recorded pull request, or a run explicitly marked recoverable.
+- `attention`: committed/pushed work without a recorded pull request, a recoverable run, or another condition needing human attention.
 - `directed_pending`: queued directed items without a terminal item event.
-- `allowance_days`: distinct maintenance days with `daily_allowance_claimed`.
-- `allowance_days_by_task_type`: allowance days grouped by task type.
-- `implementation`: implementation runs, batches, and per-item delivered/deferred/reverted/stale events.
+- `allowance_days`: distinct maintenance days claimed by scheduled `implement-batch`; manual tasks are exempt.
+- `allowance_days_by_task_type`: scheduled allowance days grouped by task type; currently only `implement-batch` is eligible.
+- `legacy_allowance_days`: pre-v4 allowance events retained without rewriting history.
+- `implementation`: implementation runs, batches, successfully `implemented` items, and skipped outcomes grouped by reason.
 - `discovery`: discovery sessions, reviewed files/lines, candidates proposed, zero-candidate sessions, and discovery PRs.
 - `task_types`: per-type result counts and average recorded duration.
 
 A day belongs to exactly one terminal run category in exported summaries; completion wins over failure or skip.
-`delivered` means proposed in an implementation PR, not merged. Discovery candidates remain non-authoritative until their discovery PR is merged.
+`implemented` means AutoProgress successfully delivered the Draft implementation review; it does not mean a human merged it. Discovery candidates remain non-authoritative until their discovery PR is merged.
 
 ## Ledger retention
 

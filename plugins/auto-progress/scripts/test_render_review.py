@@ -23,7 +23,7 @@ def implementation_input() -> tuple[dict[str, object], dict[str, object]]:
             {
                 "id": IMP_ONE,
                 "source": "automatic-discovery",
-                "result": "delivered",
+                "result": "succeeded",
                 "summary": "Avoid repeated allocation | in the hot path.",
                 "acceptance": ["The cached value is reused.", "Existing behavior remains covered."],
                 "design_tradeoffs": ["Keep the cache private."],
@@ -140,7 +140,7 @@ class RenderContractTests(unittest.TestCase):
     def test_code_facts_control_results_not_manifest_claims(self) -> None:
         manifest, facts = implementation_input()
         improvement = manifest["improvements"][0]  # type: ignore[index]
-        improvement["result"] = "delivered"  # type: ignore[index]
+        improvement["result"] = "succeeded"  # type: ignore[index]
         facts["improvements"] = {
             IMP_ONE: {"result": "reverted", "reason": "Final validation failed."}
         }
