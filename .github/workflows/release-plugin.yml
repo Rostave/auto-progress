@@ -1,0 +1,128 @@
+name: Release Codex plugin
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Validate, package, and publish
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Validate release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tags must use vMAJOR.MINOR.PATCH; received: $tag" >&2
+            exit 1
+          fi
+
+          plugin_version="$(
+            python - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = Path("plugins/auto-progress/.codex-plugin/plugin.json")
+          data = json.loads(manifest.read_text(encoding="utf-8"))
+          if data.get("name") != "auto-progress":
+              raise SystemExit(f"Unexpected plugin name: {data.get('name')!r}")
+          print(data["version"])
+          PY
+          )"
+          core_version="${plugin_version%%+*}"
+
+          if [[ "$tag" != "v$core_version" ]]; then
+            echo "Tag $tag does not match plugin version $plugin_version" >&2
+            exit 1
+          fi
+
+          echo "plugin_version=$plugin_version" >> "$GITHUB_OUTPUT"
+          echo "asset_name=auto-progress-${core_version}.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Run plugin tests
+        run: python -m unittest discover -s plugins/auto-progress/scripts -p "test_*.py" -v
+
+      - name: Validate example configuration
+        run: >-
+          python plugins/auto-progress/scripts/auto_progress.py validate-config
+          --config plugins/auto-progress/assets/auto-progress.toml
+
+      - name: Package the plugin from the tag
+        id: package
+        shell: bash
+        env:
+          ASSET_NAME: ${{ steps.version.outputs.asset_name }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+          git archive \
+            --format=zip \
+            --prefix=auto-progress/ \
+            --output="dist/$ASSET_NAME" \
+            "${GITHUB_SHA}:plugins/auto-progress"
+
+          (
+            cd dist
+            sha256sum "$ASSET_NAME" > "$ASSET_NAME.sha256"
+          )
+
+          unzip -Z1 "dist/$ASSET_NAME" | grep -Fxq \
+            "auto-progress/.codex-plugin/plugin.json"
+
+      - name: Create or finish the GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          PLUGIN_VERSION: ${{ steps.version.outputs.plugin_version }}
+          ASSET_NAME: ${{ steps.version.outputs.asset_name }}
+        run: |
+          set -euo pipefail
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --draft \
+              --verify-tag \
+              --generate-notes \
+              --title "v$PLUGIN_VERSION"
+          fi
+
+          for file in "dist/$ASSET_NAME" "dist/$ASSET_NAME.sha256"; do
+            name="$(basename "$file")"
+            if gh release view "$TAG" \
+              --json assets \
+              --jq ".assets[] | select(.name == \"$name\") | .name" \
+              | grep -Fxq "$name"; then
+              echo "Release asset already exists: $name"
+            else
+              gh release upload "$TAG" "$file"
+            fi
+          done
+
+          if [[ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" == "true" ]]; then
+            gh release edit "$TAG" --draft=false --latest
+          fi
